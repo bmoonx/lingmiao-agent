@@ -1,0 +1,10 @@
+{
+	"_note": "灵妙 Core Locks — 每次工具调用后重新注入的简短提醒。Base + Stage 拼接后不超过 core_lock_max_len。",
+	"_base_core_lock": "说中文。先查再动。制度约束每次必查。先 update_memory 再 update_knowledge（系统自动双向链接）。默认先读 rules.md 了解项目规范。",
+	"core_lock_max_len": 300,
+	"core_locks": {
+		"组织上下文": "必搜 task/audit/correction/decision。多角度（概念+用户+时间）。找到足够停。输出JSON。",
+		"工作阶段": "默认先读 rules.md 了解规范。做决策前先查 task（任务状态）、correction（历史教训）、decision（过往决策）。不确定先问。先查再动。",
+		"沉淀阶段": "一次完成观测/要点/审计/质检/任务追踪。不生成新知识。没问题 good。"
+	}
+}

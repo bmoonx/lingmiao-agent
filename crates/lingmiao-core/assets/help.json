@@ -1,0 +1,215 @@
+{
+  "_note": "灵妙内置帮助文档（随二进制发布，include_str! 内嵌）。AI 通过 help 工具查询；用户可读同名 docs/*.md。主题 id 见 topics 键，含 title / keywords / body。",
+  "topics": {
+    "overview": {
+      "title": "灵妙是什么",
+      "keywords": [
+        "简介",
+        "overview",
+        "介绍",
+        "是什么"
+      ],
+      "body": "**灵妙（lingmiao）** 是一个运行在终端里的 AI 编程助手（Rust 重写）。\n\n- 一个二进制 `lingmiao` 启动即用，无子命令。\n- 对话管线：组织上下文 → 工作阶段 → 沉淀阶段。\n- 四层记忆：归档(#1) / 观测日志(#2) / 知识图谱(#3) / 业务库(#4)。\n- 单 tokio 事件循环驱动 UI 与管线（Q2/Q3）。\n- 模型可随时切换：改程序同级的 `models.json` 即可，无需改代码（详见 topic=models）。\n\n用 help 工具（或斜杠命令 `/help`）查看更多主题。"
+    },
+    "install": {
+      "title": "安装与启动",
+      "keywords": [
+        "安装",
+        "启动",
+        "install",
+        "运行"
+      ],
+      "body": "**构建**\n\n```\ncargo build --release\n```\n\n产物在 `target/release/lingmiao`。\n\n**启动**\n\n```\n./lingmiao            # 直接运行\n./run.sh              # 仓库自带脚本（自动加载 .env 并自检）\n```\n\n启动需要一个模型的 API key（见 topic=env）。首次启动会在当前目录创建 `.memory/`（持久记忆）与 `.cache/lingmiao/`（易失：日志 / 临时 / loop 状态）。\n\n交互式 TUI 需要真实终端（stdout 是 tty）；否则程序打印一行摘要后退出。"
+    },
+    "layout": {
+      "title": "程序与文件布局",
+      "keywords": [
+        "目录",
+        "布局",
+        "layout",
+        ".memory",
+        ".cache",
+        "文件"
+      ],
+      "body": "**运行期目录（都在当前工作目录下）**\n\n- `.memory/` —— 持久记忆：四层 SQLite 库 + `constraints/` `trajectories/` `embeddings/` `whiteboard/` 子目录。**不要手删**。\n- `.cache/lingmiao/` —— 易失缓存：`logs/`（jsonl + log）、`tmp/`、`loop/`。可随时删除。\n\n**可编辑配置（可选，放二进制同级或当前目录）**\n\n- `config.json` —— **唯一用户配置文件**：模型目录 + 每个阶段的模型（见 topic=models）。已进 `.gitignore`。\n- `models.json` —— 旧的模型目录文件，仍兼容（`config.json` 没写 `models` 时生效）。\n\n**用户级**\n\n- `~/.lingmiao/.env` —— 全局 API key 文件。\n\n记忆目录名是固定字面量（`.memory` / `.cache`），与品牌名解耦——改名不会搬走已有记忆。"
+    },
+    "models": {
+      "title": "配置模型（config.json / models.json）",
+      "keywords": [
+        "配置",
+        "模型",
+        "api",
+        "group",
+        "provider",
+        "key",
+        "config.json",
+        "models.json",
+        "阶段",
+        "方言"
+      ],
+      "body": "**加一个 API 来源 = 加一个 group；让某阶段用别的模型 = 加一条 `stages` 路由。都不用改代码。**\n\n## config.json（首选）\n\n程序在**二进制同级目录**或**当前工作目录**找 `config.json`（也可用 `LINGMIAO_CONFIG=<file>` 指定）：\n\n```json\n{\n  \"models\": {\n    \"default\": { \"group\": \"deepseek\", \"model\": \"deepseek-v4-flash-vision-exp\" },\n    \"groups\": [ /* 与 models.json 的 groups 完全同构 */ ]\n  },\n  \"stages\": {\n    \"组织上下文\": { \"group\": \"deepseek\", \"model\": \"deepseek-v4-flash\" },\n    \"工作阶段\":      { \"group\": \"deepseek\", \"model\": \"deepseek-v4-pro\" },\n    \"沉淀阶段\":    { \"group\": \"kimi\",     \"model\": \"kimi-for-coding\" }\n  }\n}\n```\n\n- `stages`：把**管线每个阶段**指到自己的 `group/model`。因为一个 group 就是一个 API 来源，所以不同阶段可以走**不同厂商**（例：沉淀阶段用 Kimi，对话用 DeepSeek）。\n- 某阶段没写（或整块 `stages` 缺失）→ 该阶段回退到默认模型，行为与旧版一致。\n- 路由里的 group/model 不存在、或该组 `api_key_env` 没设 → 该条被**跳过并告警**，阶段回退默认模型（不会启动失败）。\n- `models`：可选。写了就用它当模型目录；没写则回退到 `models.json` 链（下）。\n\n## models.json（兼容保留）\n\n`config.json` 没有 `models` 键时，程序按下列优先级找 `models.json`（任一缺失向下回退）：\n\n1. 环境变量 `LINGMIAO_MODELS` 指定的文件\n2. 二进制同级目录的 `models.json`\n3. 当前工作目录的 `models.json`\n4. 内置默认（deepseek / kimi / claude 三组）\n\n## 模型目录结构（`models` / `models.json` 同一套 schema）\n\n```json\n{\n  \"default\": { \"group\": \"deepseek\", \"model\": \"deepseek-v4-pro\" },\n  \"groups\": [\n    {\n      \"id\": \"glm\",\n      \"label\": \"智谱 GLM\",\n      \"protocol\": \"openai\",\n      \"base_url\": \"https://open.bigmodel.cn/api/paas/v4\",\n      \"api_key_env\": \"GLM_API_KEY\",\n      \"models\": [\n        { \"id\": \"glm-4.6\", \"label\": \"GLM-4.6\" }\n      ]\n    }\n  ]\n}\n```\n\n**字段**\n\n- `protocol`：`openai`（绝大多来源）或 `anthropic`。这是唯一需要代码适配的维度。\n- `base_url`：端点，程序自动拼 `/chat/completions`（openai）或 `/v1/messages`（anthropic）。\n- `api_key`（内联明文）或 `api_key_env`（读环境变量），二者其一。\n- 上下文窗口：**不假设 / 不支持**——provider API 对窗口不准确，本系统不设 `context_window`（不显示窗口数字、不做占比/阈值）。\n- `models[]` 的其余键（如 `thinking: true`）原样透传进请求体。\n\n改完重启生效；界面里也可随时切换活动模型（`group × model` 的拍平列表）。"
+    },
+    "config": {
+      "title": "配置总览",
+      "keywords": [
+        "配置",
+        "config",
+        "config.json",
+        "覆盖",
+        "override",
+        "阶段模型"
+      ],
+      "body": "灵妙的配置分两类：\n\n- **内置资源（JSON，随二进制发布，include_str! 内嵌）**：`prompts.json`（提示词）、`stages.json`（每阶段工具白名单 + 超时）、`locks.json`（核心锁）、`mcp.json`（MCP 服务器）、`help.json`（本帮助）。\n- **用户配置面：`config.json`**（二进制同级或当前目录）——模型目录（`models`）+ **每个阶段的模型路由**（`stages`）。见 topic=models。\n- `models.json` 仍兼容：`config.json` 没写 `models` 时按旧优先级生效。\n- `~/.lingmiao/.env` —— 全局 API key。\n\n设置环境变量 `LINGMIAO_CONFIG_DIR=<dir>` 可用一个目录整体覆盖内嵌资源。若该目录缺少完整管线（组织上下文 / 工作阶段 / 沉淀阶段），程序告警并回退内嵌默认——不会用半套配置空跑。"
+    },
+    "env": {
+      "title": "环境变量与 .env",
+      "keywords": [
+        "env",
+        ".env",
+        "密钥",
+        "变量",
+        "环境变量",
+        "key"
+      ],
+      "body": "**API key** 从环境变量读取（`api_key_env` 指定），或直接在 `models.json` 里内联。\n\n默认组的 key 环境变量名：\n\n- `DEEPSEEK_API_KEY`（deepseek，默认组）\n- `KIMI_API_KEY`（kimi）\n- `CLAUDE_API_KEY`（claude）\n\n**`.env` 解析优先级**：`~/.lingmiao/.env` → `$LINGMIAO_HOME/.env` → 二进制目录 `.env` → 当前目录上溯 ≤5 级 → `~/.claude/settings.json`。已存在的同名环境变量优先，不覆盖。\n\n**常用 LINGMIAO_* 变量**\n\n- `LINGMIAO_CONFIG` —— 指定 `config.json` 路径（用户配置：模型目录 + 阶段模型路由）。\n- `LINGMIAO_MODELS` —— 指定 `models.json` 路径（兼容旧配置）。\n- `LINGMIAO_CONFIG_DIR` —— 覆盖内嵌配置目录。\n- `LLM_PROVIDER` —— 旧式：选择默认 group id（如 `kimi`）。\n- `LINGMIAO_COMPUTER_USE=1` —— 开启 computer-use 工具组（默认关）。"
+    },
+    "commands": {
+      "title": "快捷键与斜杠命令",
+      "keywords": [
+        "快捷键",
+        "命令",
+        "slash",
+        "帮助",
+        "退出"
+      ],
+      "body": "**快捷键**\n\n- `Enter` —— 发送当前输入\n- `Shift+Enter` / `Ctrl+J` —— 换行（多行编辑）\n- `Esc` —— 中止进行中的回合（或丢弃拖选）\n- `Ctrl+C` —— **无选中时连按两次退出**（第一次在页脚给提示）；**有拖选时只复制**，不退出（先 `Esc` 丢掉选择，再连按两次才退出）\n- `Ctrl+Y` —— 复制应用内拖选的文字\n- `Ctrl+V`（或 `Shift+Insert`）—— 从系统剪贴板粘贴（Windows / Linux / macOS 均可）\n- `Ctrl+O` —— 展开/折叠思考与工具输出（文件改动的红绿 diff 恒显，不参与折叠）\n- `Ctrl+R` —— 搜索已提交的输入历史\n\n**斜杠命令（在输入框里整行输入）**\n\n- `/help` —— 显示内置帮助主题\n- `/clear` —— 清空对话历史\n- `/memory` —— 显示记忆统计（归档 / 观测 / 知识图谱）\n- `/model` —— 显示当前 group / model\n- `/quit` —— 退出\n\n文本框内用鼠标左/右键拖动可选中对话文字，再按 `Ctrl+Y`（或 `Ctrl+C`）复制 —— 复制不会被当成退出。\n\nAI 侧对应的工具是 `help`（可查询任意主题正文）。"
+    },
+    "whiteboard": {
+      "title": "小白板",
+      "keywords": [
+        "白板",
+        "whiteboard",
+        "笔记",
+        "共享"
+      ],
+      "body": "小白板是右侧面板可见的共享笔记页，跨对话持久（落在 `.memory/whiteboard/pages.json`）。\n\n- 页面（page）：0 表示当前页；可用 id 或序号寻址。\n- 操作：list / read / update（整页重写）/ append（追加）/ new_page / clear / delete_page。\n- 用途：给用户与下一轮自己看——计划、进度、决定、交接。\n\nAI 用 `whiteboard_*` 工具维护；用户可在面板直接读。"
+    },
+    "session": {
+      "title": "会话与历史",
+      "keywords": [
+        "会话",
+        "历史",
+        "session",
+        "history",
+        "上下文"
+      ],
+      "body": "每轮对话结束上下文清空，连续性靠记忆检索（`search_memory`）。\n\n- 每次提交的输入、组织上下文、工作阶段答复、沉淀都进事件总线并落记忆。\n- 历史在引擎里以 `Mutex<Vec<Message>>` 保存，快照式使用（锁不跨 await）。\n- `/clear` 清空当前会话历史；`/memory` 看记忆统计。\n\n记忆分区：chat / main / auditor 三个 zone 互相隔离，但 `search_memory` 默认跨三区融合检索。"
+    },
+    "pipeline": {
+      "title": "对话管线：组织上下文 → 工作阶段 → 沉淀阶段",
+      "keywords": [
+        "管线",
+        "阶段",
+        "流程",
+        "stage",
+        "pipeline"
+      ],
+      "body": "每个回合跑阶段的 `async fn`（Q7）：\n\n1. **组织上下文** —— 用记忆检索工具挑出本轮相关上下文。\n2. **工作阶段** —— 带工具的对话循环（model-driven，无固定轮数上限；由超时 + 无进展检测守卫）。\n3. **沉淀阶段** —— 一次整合调用，产出观测 / 审计 / 质量 / 任务状态；把提取到的 items 写入观测日志(#2)。收尾的**知识图谱更新**（原版 `I` / MG evolution，纯算法、无 LLM）已**并入本阶段**：读 #2 中 fact/preference/decision/constraint 的近期观测与知识图谱做语义相似匹配，按社区 UPDATE 或 ADD 节点。\n\n每阶段是一个 `Result` 错误边界：组织上下文 或 工作阶段 失败会降级但不中止整轮；沉淀阶段失败仍上报 summary 事件；其收尾的知识图谱更新失败只记日志、不中止。\n\n每阶段的工具白名单与超时在 `stages.json`；系统提示词在 `prompts.json`。"
+    },
+    "memory": {
+      "title": "记忆体系与目录",
+      "keywords": [
+        "记忆",
+        "memory",
+        ".memory",
+        "知识图谱",
+        "观测",
+        "归档"
+      ],
+      "body": "四层记忆（都落在 `.memory/`）：\n\n- **#1 归档 archive** —— 原始回合（用户消息 / 助手输出 / token 计数）。\n- **#2 观测日志 observations** —— 事实 / 偏好 / 决策 / 约束 / 教训，支持语义检索。\n- **#3 知识图谱 knowledge** —— 节点 + 边，按 (kind,name) 幂等更新版本。\n- **#4 业务库 business_db** —— 自由 schema 的业务数据。\n\n工具：`search_observations` / `search_knowledge` / `search_archive` / `memory_stats` / `memory_kinds` / `update_memory` / `update_knowledge` 等。\n\n首选检索工具是 `search_memory`：跨 chat + main + auditor 三区融合，语义 + 关键词混合召回后 LLM 精排。\n\n跨项目：`search_external_memory` **只读**检索**另一个项目**的 `.memory/`（同样三区融合召回），用于复用兄弟项目的记忆；目标项目不会被写入或迁移。"
+    },
+    "tools": {
+      "title": "可用工具清单",
+      "keywords": [
+        "工具",
+        "tool",
+        "能力"
+      ],
+      "body": "工具组（各自实现统一 `Tool` trait，注册进 `ToolRegistry`）：\n\n- **file_tools** —— `read_file` / `write_file` / `edit` / `glob` / `grep` / `list_directory` / `delete_file` / `copy_file` / `bash`（沙箱约束）。\n- **whiteboard** —— `whiteboard_list/read/update/append/new_page/clear/delete_page`。\n- **memory** —— `search_memory`（跨层聚合）、`search_observations/knowledge/archive`、`search_external_memory`（跨项目只读）、`memory_stats`、`memory_kinds`、`update_memory`、`update_knowledge` 等。\n- **business** —— `business_db_query` / `execute` / `schema`。\n- **meta** —— `meta_list`（机制目录）/ `meta_show`（下钻）/ `meta_state`（实时快照），读取本机运行时的机制真值（详见 topic=meta）。\n- **verify** —— `verify_acceptance`，解析设计文档里的 ```acceptance 代码块并逐条断言重跑（详见 topic=verify）。\n- **computer_use**（默认关，`LINGMIAO_COMPUTER_USE=1` 开启）—— 截图 / 鼠标 / 键盘 / 命令。\n- **help** —— 本工具，查询内置帮助文档。\n- **mcp** —— 远程 MCP 服务器适配为本地工具（feature `mcp`）。\n\n阶段只能调用其白名单内的工具（`stages.json`）。"
+    },
+    "meta": {
+      "title": "元认知平台（meta 工具组）",
+      "keywords": [
+        "meta",
+        "元认知",
+        "机制",
+        "自身",
+        "下钻",
+        "state"
+      ],
+      "body": "`meta` 工具组让 AI 读取**本机运行时的机制真值**，而不是凭记忆猜。\n\n- `meta_list` —— 机制目录（9 项）：search / embed / zones / store / pipeline / whitelist / config / events / tools。\n- `meta_show` —— 下钻一个机制的某个视图，例如 `meta_show(embed, backend)` 返回当前嵌入后端、`meta_show(store, schema)` 返回各库的运行时列（读 `PRAGMA table_info`，不会与 DDL 漂移）、`meta_show(search, ranking)` 返回关键词字段权重。\n- `meta_state` —— 实时快照（后端 / 三区计数 / 管线段数等）。\n\n设计原则（M6.4「真源不抄」）：这些视图一律读**运行时真值**（常量放使用点、schema 走运行时 catalog），不做文档副本。三个工具在所有 stage 白名单内可用。"
+    },
+    "verify": {
+      "title": "验收引擎（verify 工具）",
+      "keywords": [
+        "verify",
+        "验收",
+        "acceptance",
+        "断言",
+        "oracle",
+        "测试"
+      ],
+      "body": "`verify_acceptance` 是**纯代码验收 oracle**（原版 `verifier.py`，无 LLM），对设计文档有否决权：断言要么通过，要么不通过，没有模型判断。\n\n从设计文档里的 ```acceptance 代码块解析断言，逐条对真实工作目录重跑：\n\n```\nfile_exists <path>\nfile_not_exists <path>\nfile_contains <path> :: <substring>\nfile_not_contains <path> :: <substring>\ncommand_succeeds <cmd...>\ncommand_fails <cmd...>\ncommand_output_contains <cmd...> :: <substring>\nfreeze <path>\n```\n\n- `{python}` / `{cargo}` 占位符在运行时展开为当前解释器 / cargo，跨机器可移植。\n- 块内注释行（`# [需求 R-01] …`）设定断言的所属层级；层级关键字：需求 / 功能 / 模块 / 验收，报告按层级汇总通过率。\n- 另有一组**弱诚实性下限**断言（doc_length_min / ref_density_min / assert_no_summary_only / assert_needs_clarification / assert_traceable）——是最低诚实性检查，不是正确性证明。\n\n在 工作阶段 / 沉淀阶段白名单内可用。"
+    },
+    "mcp": {
+      "title": "MCP 扩展",
+      "keywords": [
+        "mcp",
+        "扩展",
+        "服务器"
+      ],
+      "body": "MCP（Model Context Protocol）服务器声明在 `mcp.json` 的 `mcpServers` 对象里（`command` / `args` / `env`）。\n\n- 编译需 `--features mcp`（基于官方 `rmcp` SDK，不拉 TLS 依赖）。\n- 远程工具经 `RemoteTool` 适配为本地 `Tool`，并入同一个 canonical tools 数组。\n- 默认 feature 关闭，无配置时零开销。"
+    },
+    "logs": {
+      "title": "日志与诊断",
+      "keywords": [
+        "日志",
+        "log",
+        "诊断",
+        "jsonl"
+      ],
+      "body": "日志双通道，落在 `.cache/lingmiao/logs/`：\n\n- `lingmiao-<ts>.jsonl` —— 结构化事件（每行一个 JSON）。\n- `lingmiao-<ts>.log` —— 人类可读 tracing 输出。\n\n事件总线（11 变体）的每一步都写日志：阶段开始 / LLM token 流 / 工具调用 / 上下文组成 / 沉淀阶段上报等。\n\n启动横幅会打印本次日志文件路径。排障先看 `.log` 的 WARN/ERROR，再用 `memory_stats` + `/memory` 核对记忆状态。"
+    },
+    "troubleshoot": {
+      "title": "常见问题（FAQ）",
+      "keywords": [
+        "faq",
+        "排障",
+        "问题",
+        "疑问",
+        "why"
+      ],
+      "body": "**启动就退出？** 未设置 API key。检查 `DEEPSEEK_API_KEY`（或你所用组的 `api_key_env`）。程序会打印 hint。\n\n**加了新来源不生效？** 确认 `models.json` 的查找路径（`LINGMIAO_MODELS` → 二进制同级 → 当前目录），改完重启。\n\n**`protocol` 写错？** 只支持 `openai` / `anthropic`；未知值会告警并回退 `openai`。\n\n**记忆不见 / 被清？** 持久记忆在 `.memory/`（勿删）；`.cache/lingmiao/` 只放易失数据。\n\n**TUI 显示怪字符？** 终端字体缺 CJK 会导致中文显示为豆腐块——安装中文字体（如 `fonts-noto-cjk`）。"
+    },
+    "errors": {
+      "title": "错误说明",
+      "keywords": [
+        "错误",
+        "error",
+        "异常"
+      ],
+      "body": "错误按 `LingmiaoError` 分层（kind + recoverable）：\n\n- **fatal** —— 不可恢复（缺 API key、配置非法、库损坏），必须终止。\n- **safe / tool / llm / memory / stage** —— 可恢复，引擎降级继续。\n- **config** —— 配置非法/缺失，启动期通常致命。\n\n工具失败会以 `is_error=true` 的结果回灌给模型（模型可自愈），不会炸掉整轮。单阶段失败只降级该阶段。\n\n启动横幅 / `.log` 会带上错误 kind 与上下文，便于定位。"
+    },
+    "for-ai": {
+      "title": "给 AI：生成/修改配置与用法",
+      "keywords": [
+        "ai",
+        "生成",
+        "schema",
+        "示例",
+        "怎么写"
+      ],
+      "body": "当用户要求「加一个模型来源 / 换模型 / 生成配置」时：\n\n1. 写/改 `<cwd>/config.json`（或二进制同级的 `config.json`），**不要**改 Rust 代码。旧版用 `models.json` 也仍可。\n2. 用 `help` 工具（topic=models）确认字段后再写，不要凭记忆猜。\n3. `config.json` schema：\n\n```\n{\n  \"models\": { \"default\": { \"group\": <string>, \"model\": <string> },   // 可选\n              \"groups\": [ /* 同 models.json */ ] },\n  \"stages\": { <阶段名>: { \"group\": <string>, \"model\": <string> } }   // 可选\n}\n```\n\n`models.json`（兼容）schema：\n\n```\n{\n  \"default\": { \"group\": <string>, \"model\": <string> },   // 可选\n  \"groups\": [{\n    \"id\": <string>, \"label\": <string?>, \"protocol\": \"openai\"|\"anthropic\",\n    \"base_url\": <string>,\n    \"api_key\": <string?> | \"api_key_env\": <string?>,\n    \"models\": [{ \"id\": <string>, \"label\": <string?>, ...extra }]\n  }]\n}\n```\n\n4. `protocol=openai` 覆盖 DeepSeek/Kimi/GLM/Qwen/OpenRouter/本地 vLLM/Ollama 等；只有全新协议才需要新方言适配器（罕见）。\n5. 改完提示用户重启生效（或按提示切换）。\n\n生成 key 时用 `api_key_env` 指向环境变量，避免明文入库；`config.json` / `models.json` 都已进 `.gitignore`。\n\n阶段名用全名：`组织上下文` / `工作阶段` / `沉淀阶段`。"
+    }
+  }
+}

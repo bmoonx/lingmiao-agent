@@ -1,0 +1,23 @@
+[package]
+name = "lingmiao-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "灵妙 memory layer (SQLite stores + embeddings) — M2"
+
+[[example]]
+name = "embed_probe"
+
+[dependencies]
+lingmiao-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Real ONNX MiniLM-L6-v2 embeddings (Q4/A4). Mandatory as of ④真语义: the
+# production embedder is the semantic model; there is no compile-time switch and
+# no lexical fallback (a load failure is a hard error).
+fastembed.workspace = true
