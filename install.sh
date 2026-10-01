@@ -11,7 +11,7 @@
 #        git clone https://github.com/bmoonx/lingmiao.git
 #        cd lingmiao && ./install.sh
 #
-#   2) 不克隆，直接从 GitHub 拉分块（只下载二进制，不下载源码）：
+#   2) 不克隆，直接从 GitHub 拉分块（只取二进制）：
 #        ./install.sh --from-github
 #
 # 选项：
@@ -44,15 +44,23 @@ done
 
 case "$(uname -s)" in
   Linux)  OS=linux ;;
-  Darwin) OS=darwin ;;
-  *) echo "✗ 暂不支持的系统：$(uname -s)。请在 Linux / macOS 上运行，或从源码构建。" >&2; exit 1 ;;
+  *) echo "✗ 暂不支持的系统：$(uname -s)。当前仅提供 Linux x86_64 的预编译二进制（推荐 Ubuntu 24.04 LTS）。" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
   x86_64|amd64) ARCH=x86_64 ;;
-  arm64|aarch64) ARCH=aarch64 ;;
-  *) echo "✗ 暂不支持的架构：$(uname -m)" >&2; exit 1 ;;
+  *) echo "✗ 暂不支持的架构：$(uname -m)。当前仅提供 x86_64（amd64）。" >&2; exit 1 ;;
 esac
 PLAT="${OS}-${ARCH}"
+
+# ── 系统兼容性：二进制动态链接 glibc，要求 glibc >= 2.39（Ubuntu 24.04 自带）──
+if command -v ldd >/dev/null 2>&1; then
+  HAVE_GLIBC="$(ldd --version 2>/dev/null | head -1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+  if [ -n "$HAVE_GLIBC" ] && [ "$(printf '%s\n' 2.39 "$HAVE_GLIBC" | sort -V | head -1)" != "2.39" ]; then
+    echo "✗ 本机 glibc ${HAVE_GLIBC} 过低：该二进制要求 glibc >= 2.39。" >&2
+    echo "  推荐在 Ubuntu 24.04 LTS 上运行（或在目标机自行构建）。" >&2
+    exit 1
+  fi
+fi
 
 SRC_DIR="$SCRIPT_DIR/release"
 TMP="$(mktemp -d)"
