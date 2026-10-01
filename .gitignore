@@ -34,3 +34,6 @@
 # ── fastembed / ONNX model cache (downloaded weights, never committed) ──
 /.fastembed_cache/
 /.cache/
+
+# ── install.sh 的解压输出（本地生成，不入库） ──
+/dist/
