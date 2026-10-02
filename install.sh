@@ -8,8 +8,8 @@
 #
 # 用法（两种，任选）：
 #   1) 先克隆仓库再跑（推荐，无需额外网络）：
-#        git clone https://github.com/bmoonx/lingmiao.git
-#        cd lingmiao && ./install.sh
+#        git clone https://github.com/bmoonx/lingmiao-agent.git
+#        cd lingmiao-agent && ./install.sh
 #
 #   2) 不克隆，直接从 GitHub 拉分块（只取二进制）：
 #        ./install.sh --from-github
@@ -22,7 +22,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 set -euo pipefail
 
-REPO="bmoonx/lingmiao"
+REPO="bmoonx/lingmiao-agent"
 RAW_BASE="https://raw.githubusercontent.com/${REPO}/main"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 FROM_GITHUB=0

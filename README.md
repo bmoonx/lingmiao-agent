@@ -194,13 +194,13 @@ Claude Code 已经把「终端里的编程助手」做到很高水准。但有�
 
 ```sh
 # 取回预编译二进制 —— 分块存放，附带一个安装器帮你校验、合并、解压
-git clone https://github.com/bmoonx/lingmiao.git
-cd lingmiao && ./install.sh          # 无需 Python / Node / Rust
+git clone https://github.com/bmoonx/lingmiao-agent.git
+cd lingmiao-agent && ./install.sh          # 无需 Python / Node / Rust
 ```
 
 > 也可以不克隆仓库，直接跑安装器（只取二进制）：
 >
-> `curl -fsSL https://raw.githubusercontent.com/bmoonx/lingmiao/main/install.sh | bash -s -- --from-github`
+> `curl -fsSL https://raw.githubusercontent.com/bmoonx/lingmiao-agent/main/install.sh | bash -s -- --from-github`
 
 装好后，在项目目录里敲一句 `lingmiao`，等几秒加载完就进入 TUI —— **当前目录就是它的工作路径**。
 完整用法见[使用方法](#使用方法)。
@@ -240,8 +240,8 @@ Ubuntu 24.04 LTS 自带 glibc 2.39，正好满足 —— **目前只有这一个
 于是它被**切成 3 块小文件**放在仓库的 `release/` 目录里，配一个安装器 `install.sh` 负责「校验 → 合并 → 解压 → 就位」。
 
 ```sh
-git clone https://github.com/bmoonx/lingmiao.git
-cd lingmiao && ./install.sh        # 产出 ./dist/lingmiao-<版本>-<平台>/lingmiao
+git clone https://github.com/bmoonx/lingmiao-agent.git
+cd lingmiao-agent && ./install.sh        # 产出 ./dist/lingmiao-<版本>-<平台>/lingmiao
 ./dist/lingmiao-<版本>-<平台>/lingmiao
 ```
 
@@ -252,7 +252,7 @@ cd lingmiao && ./install.sh        # 产出 ./dist/lingmiao-<版本>-<平台>/li
 不想克隆仓库、只想要二进制？让安装器直接从 GitHub 拉分块：
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/bmoonx/lingmiao/main/install.sh | bash -s -- --from-github
+curl -fsSL https://raw.githubusercontent.com/bmoonx/lingmiao-agent/main/install.sh | bash -s -- --from-github
 ```
 
 首次运行会在**当前目录**创建 `.memory/`（持久记忆）与 `.cache/lingmiao/`（易失：日志 / 临时 / loop 状态）。
