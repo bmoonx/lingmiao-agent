@@ -37,3 +37,16 @@
 
 # ── install.sh 的解压输出（本地生成，不入库） ──
 /dist/
+
+# ── 非发布物（源码 / 设计文档 / 开源协议 / 内部规范） ──
+# 本仓只分发二进制（cli 2026-10-01 口径），下列文件若在本仓工作树出现一律不入库。
+/Cargo.toml
+/Cargo.lock
+/rust-toolchain.toml
+/rules.md
+/run.sh
+/LICENSE-MIT
+/LICENSE-APACHE
+/crates/
+/docs/
+/.github/
