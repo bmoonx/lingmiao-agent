@@ -1,0 +1,25 @@
+{
+  "mcpServers": {
+    "_note": "示例 / 本机模板：默认全部禁用（`_` 前缀 = 跳过）。把你的 server 命令填进对应条目并去掉前缀即可启用；私径与内部项目名不应随仓库分发（cli 2026-09-29）。",
+    "_playwright": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp",
+        "--browser", "chromium",
+        "--headless",
+        "--isolated"
+      ]
+    },
+    "_tui-mcp": {
+      "command": "node",
+      "args": [
+        "/path/to/tui-mcp/src/server.js"
+      ]
+    },
+    "_example-stdio-server": {
+      "command": "/path/to/your-mcp-server",
+      "args": []
+    }
+  }
+}

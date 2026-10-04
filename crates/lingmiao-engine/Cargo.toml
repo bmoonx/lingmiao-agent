@@ -1,0 +1,21 @@
+[package]
+name = "lingmiao-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "灵妙 QL orchestrator — tool-driven pipeline (M4: 组织上下文 → 工作阶段 → 沉淀阶段)"
+
+[dependencies]
+lingmiao-core.workspace = true
+lingmiao-memory.workspace = true
+lingmiao-llm.workspace = true
+lingmiao-tools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+async-trait.workspace = true
+futures-util.workspace = true
+rusqlite.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "macros", "time", "process", "fs"] }
+chrono.workspace = true
+tracing.workspace = true

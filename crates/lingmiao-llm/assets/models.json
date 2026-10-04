@@ -1,0 +1,62 @@
+{
+  "_comment": "灵妙内置模型配置（随二进制发布，作为 models.json 的兜底）。用户可在程序同级或当前目录放一份 models.json 覆盖——加来源=加一个 group，无需改代码。完整说明见内置帮助：调用 help 工具，topic=\"models\"。注意：不设 context_window——本系统不假设任何模型的上下文窗口大小（provider API 对此不准确）。",
+  "default": { "group": "deepseek", "model": "deepseek-v4-flash-vision-exp" },
+  "groups": [
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "protocol": "openai",
+      "base_url": "https://api.deepseek.com",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "base_url_env": "DEEPSEEK_BASE_URL",
+      "model_env": "DEEPSEEK_MODEL",
+      "models": [
+        {
+          "id": "deepseek-v4-flash-vision-exp",
+          "label": "DeepSeek V4 Flash Vision",
+          "supports_vision": true
+        },
+        {
+          "id": "deepseek-v4-pro",
+          "label": "DeepSeek V4 Pro",
+          "thinking": true
+        },
+        {
+          "id": "deepseek-v4-flash",
+          "label": "DeepSeek V4 Flash"
+        }
+      ]
+    },
+    {
+      "id": "kimi",
+      "label": "Kimi for Coding",
+      "protocol": "openai",
+      "base_url": "https://api.kimi.com/coding/v1",
+      "api_key_env": "KIMI_API_KEY",
+      "base_url_env": "KIMI_BASE_URL",
+      "model_env": "KIMI_MODEL",
+      "models": [
+        {
+          "id": "kimi-for-coding",
+          "label": "Kimi for Coding"
+        }
+      ]
+    },
+    {
+      "id": "claude",
+      "label": "Claude",
+      "protocol": "anthropic",
+      "base_url": "https://api.anthropic.com",
+      "api_key_env": "CLAUDE_API_KEY",
+      "base_url_env": "CLAUDE_BASE_URL",
+      "model_env": "CLAUDE_MODEL",
+      "models": [
+        {
+          "id": "claude-fable-5",
+          "label": "Claude Fable 5",
+          "supports_vision": true
+        }
+      ]
+    }
+  ]
+}

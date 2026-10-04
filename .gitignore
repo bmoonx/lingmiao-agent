@@ -1,0 +1,42 @@
+# ── Rust build artifacts ──
+/target/
+**/*.rs.bk
+
+# ── lingmiao runtime state (per-project) ──
+# 需求③: durable memory lives in /.memory/; the volatile cache (.cache/) is
+# ignored further below.
+/.memory/
+
+# ── editor / OS noise ──
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# ── local env / secrets ──
+.env
+.env.local
+# 需求②: user-edited model catalogue (may hold inline API keys)
+/models.json
+# cli 2026-09-27: the user configuration file (model catalogue + per-stage
+# model routing; may hold inline API keys). Sits next to the binary or in the cwd.
+/config.json
+
+# ── session scratch (created while the tool itself runs here) ──
+/auto-sessions/
+
+# ── 本地宣传/资料目录（不做交付物） ──
+/xuanchuan/
+
+# ── MCP scratch (playwright-mcp dumps page snapshots while it runs here) ──
+/.playwright-mcp/
+
+# ── fastembed / ONNX model cache (downloaded weights, never committed) ──
+/.fastembed_cache/
+/.cache/
+
+# ── musl 试验等本地 cargo 配置残留（不入库） ──
+/.cargo/
+
+# ── install.sh 的解压输出（本地生成，不入库） ──
+/dist/

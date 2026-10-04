@@ -1,0 +1,34 @@
+[package]
+name = "lingmiao-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "灵妙 tool registry + builtin tools + MCP client — M3"
+
+[features]
+default = ["mcp"]
+# Official `rmcp` MCP client (Q6). ⑤ MCP 接上: on by default so a stock build
+# talks to the declared `mcp.json` servers (Page34 ④). Still feature-gated so a
+# `--no-default-features` build drops the rmcp dependency tree entirely.
+mcp = ["dep:rmcp"]
+
+[dependencies]
+lingmiao-core.workspace = true
+lingmiao-memory.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+async-trait.workspace = true
+schemars.workspace = true
+glob.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "process", "time", "io-util"] }
+rmcp = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "rt-multi-thread", "time"] }
+# `search_quality_probe` example reads raw `embedding` blobs from a read-only
+# copy of a memory store (the `search_*` APIs return rows, not vectors).
+rusqlite.workspace = true

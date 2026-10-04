@@ -1,0 +1,109 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lingmiao",
+    "crates/lingmiao-core",
+    "crates/lingmiao-memory",
+    "crates/lingmiao-llm",
+    "crates/lingmiao-tools",
+    "crates/lingmiao-engine",
+    "crates/lingmiao-tui",
+]
+
+[workspace.package]
+version = "0.12.43"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.85"
+description = "灵妙-Agent (lingmiao) — a Rust AI coding assistant engine"
+repository = "https://github.com/bmoonx/lingmiao-agent"
+
+[workspace.dependencies]
+# ── serialization ──────────────────────────────
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── image encoding (⑥ vision: read_file image → base64 data URL) ──
+base64 = "0.22"
+
+# ── errors ─────────────────────────────────────
+thiserror = "2"
+
+# ── async runtime ──────────────────────────────
+tokio = { version = "1", features = ["sync"] }
+tokio-stream = "0.1"
+
+# ── observability ──────────────────────────────
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# ── time ───────────────────────────────────────
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# ── persistence (Q4: one SQLite DB per store, bundled amalgamation) ──
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+# ── embeddings (Q4/A4: multilingual-e5-small, 384-dim, ONNX via fastembed-rs) ──
+# Mandatory as of ④真语义: the semantic model is the production embedder, with no
+# compile-time switch and no lexical fallback. rustls variants (no native-tls) so
+# no system OpenSSL/pkg-config is required.
+#
+# 单二进制分发（cli 2026-10-01）: the model weights themselves are embedded in
+# `lingmiao-memory` via `include_bytes!` (see `src/embed.rs`) and unpacked to the
+# user cache on first use, so a download is never needed.
+#
+# `ort-download-binaries-rustls-tls`: the ONNX Runtime is fetched once at build
+# time and linked in, so the resulting binary is self-contained (no runtime
+# `libonnxruntime.so` hunting via `ORT_DYLIB_PATH`). Downloaded artifacts are
+# cached under the ort-sys cache dir, so rebuilds stay offline.
+fastembed = { version = "6", default-features = false, features = [
+    "hf-hub-rustls-tls",
+    "ort-download-binaries-rustls-tls",
+] }
+
+# ── embedded model archive (pure-Rust gzip so unpacking pulls no system lib) ──
+flate2 = "1"
+
+# ── networking / http (Q5: hand-rolled SSE over reqwest) ──
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+    "charset",
+    "http2",
+] }
+futures-util = "0.3"
+
+# ── terminal UI (Q2: ratatui CC 单栏 + 应用内翻页) ──
+ratatui = "0.29"
+crossterm = "0.28"
+
+# ── process control (F 项: kill a timed-out child's whole process group) ──
+libc = "0.2"
+
+# ── tool layer (Q6: `Tool` trait + schemars-derived JSON Schema) ──
+schemars = "0.8"
+async-trait = "0.1"
+glob = "0.3"
+
+# ── MCP client (Q6: official `rmcp` SDK) ──
+# Client-side only, stdio child-process transport. No TLS is requested so no
+# system OpenSSL/pkg-config is needed (mirrors the fastembed rustls decision).
+rmcp = { version = "3", default-features = false, features = [
+    "client",
+    "transport-child-process",
+    "transport-async-rw",
+    "schemars",
+] }
+
+# ── internal crates ────────────────────────────
+lingmiao-core = { path = "crates/lingmiao-core" }
+lingmiao-memory = { path = "crates/lingmiao-memory" }
+lingmiao-llm = { path = "crates/lingmiao-llm" }
+lingmiao-tools = { path = "crates/lingmiao-tools" }
+lingmiao-engine = { path = "crates/lingmiao-engine" }
+lingmiao-tui = { path = "crates/lingmiao-tui" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
