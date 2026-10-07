@@ -418,6 +418,59 @@ pub fn discover_constraints(
     Ok(before)
 }
 
+/// 把 Auditor 本轮**当场**输出的 `extracted_constraints` 落进 `auto_learned.json`
+/// （原版 `_parse_auditor_result` 里的第四层 EPO-Safe 路径）。
+///
+/// 与 [`discover_constraints`] 的区别：后者是**会话结束后**按 feedback 关键词
+/// 事后提取；这里收的是 Auditor 按提示词第 4 层直接给出的结构化约束 —— 两条
+/// 路径写同一个文件，故共用同一套「按 `condition` 前 60 字符去重」的口径。
+///
+/// `source_session` / `iteration` 由调用点补（parse 阶段拿不到会话上下文）。
+/// 返回写入后文件里的条目总数（无新增时返回原数量）。
+pub fn record_extracted_constraints(
+    paths: &MetaPaths,
+    session_id: &str,
+    iteration: u64,
+    extracted: &[AutoConstraint],
+) -> Result<usize, LingmiaoError> {
+    if extracted.is_empty() {
+        return Ok(load_constraints(paths).len());
+    }
+    let mut existing = load_constraints(paths);
+    let before = existing.len();
+    let now = super::now_iso();
+    for c in extracted {
+        let condition = c.condition.trim();
+        if condition.is_empty() {
+            continue;
+        }
+        existing.push(AutoConstraint {
+            condition: condition.to_string(),
+            prohibited_action: c.prohibited_action.clone(),
+            reason: c.reason.clone(),
+            source_session: session_id.to_string(),
+            iteration,
+            created_at: now.clone(),
+            active: true,
+        });
+    }
+    if existing.len() == before {
+        return Ok(before);
+    }
+    // 与约束发现同口径：按 `condition` 前 60 字符去重（取最新）。
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut unique: Vec<AutoConstraint> = Vec::new();
+    for c in existing.into_iter().rev() {
+        let key: String = c.condition.chars().take(CONSTRAINT_DEDUP_PREFIX).collect();
+        if seen.insert(key) {
+            unique.push(c);
+        }
+    }
+    unique.reverse();
+    save_constraints(paths, &unique)?;
+    Ok(unique.len())
+}
+
 /// Main 消息里的「历史经验」块（原版 critical 最近 3 / major 最近 5）。
 pub fn meta_improvements_block(paths: &MetaPaths) -> String {
     let all = load_improvements(paths);
@@ -561,6 +614,41 @@ mod tests {
         discover_constraints(&mut state, &paths, "a").unwrap();
         let n = discover_constraints(&mut state, &paths, "b").unwrap();
         assert_eq!(n, 1, "identical condition must not be duplicated");
+        std::fs::remove_dir_all(paths.dir.parent().unwrap()).ok();
+    }
+
+    /// F2 锁步：Auditor 当场输出的 `extracted_constraints` 落 auto_learned.json
+    /// （原版 `_parse_auditor_result` 的第四层路径）。补全会话上下文
+    /// （source_session / iteration），并沿用 60 字符去重口径。
+    #[test]
+    fn extracted_constraints_are_persisted_with_session_context() {
+        let paths = tmp_paths("extracted");
+        let items = vec![AutoConstraint {
+            condition: "当 Main 本轮无实质代码改动时".to_string(),
+            prohibited_action: "禁止声称本轮完成".to_string(),
+            reason: "无产出不算完成".to_string(),
+            active: true,
+            ..Default::default()
+        }];
+        let n = record_extracted_constraints(&paths, "s9", 3, &items).unwrap();
+        assert_eq!(n, 1);
+        let cs = load_constraints(&paths);
+        assert_eq!(cs[0].condition, "当 Main 本轮无实质代码改动时");
+        assert_eq!(cs[0].source_session, "s9");
+        assert_eq!(cs[0].iteration, 3);
+        assert!(cs[0].active);
+        assert!(!cs[0].created_at.is_empty(), "created_at is filled in");
+        // 空 condition 的条目被丢弃；重复 condition 不叠加。
+        let blank = vec![AutoConstraint {
+            condition: "   ".to_string(),
+            ..Default::default()
+        }];
+        assert_eq!(
+            record_extracted_constraints(&paths, "s9", 4, &blank).unwrap(),
+            1
+        );
+        let again = record_extracted_constraints(&paths, "s9", 5, &items).unwrap();
+        assert_eq!(again, 1, "same condition prefix must dedup");
         std::fs::remove_dir_all(paths.dir.parent().unwrap()).ok();
     }
 }

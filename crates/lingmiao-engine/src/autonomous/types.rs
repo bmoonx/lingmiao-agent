@@ -110,6 +110,13 @@ pub struct AuditorResult {
     pub evidence: Vec<Value>,
     pub counterfactual: Value,
     pub issues: Vec<FeedbackIssue>,
+    /// 本轮 Auditor 按提示词第 4 层输出的自学习约束（原版
+    /// `_parse_auditor_result` 的 `extracted_constraints` 当场路径）。
+    ///
+    /// 解析只填 `condition` / `prohibited_action` / `reason`（原版口径）；
+    /// `source_session` / `iteration` / `created_at` 由
+    /// [`super::meta::record_extracted_constraints`] 在落盘时补齐。
+    pub extracted_constraints: Vec<AutoConstraint>,
     /// 非空表示本轮 Auditor **自身** fault（超时 / 无进展 / 传输错误）——
     /// 此时 `continue_` 按 `true` 处理（不阻塞主循环，原版口径）。
     pub fault: String,

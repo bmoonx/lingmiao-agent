@@ -185,8 +185,21 @@ impl RoleRuntime {
             if key.is_empty() {
                 String::new()
             } else {
-                cfg.prompt(key, lingmiao_core::config::PromptField::System)
-                    .to_string()
+                let block = cfg
+                    .prompt(key, lingmiao_core::config::PromptField::System)
+                    .to_string();
+                // 防「静默为空」回归：键存在但提示词缺失时 `cfg.prompt()` 只返回空串，
+                // 角色 system 就悄悄丢了整份身份（见本文件测试的说明）。留一条告警，
+                // 让它在真实运行里也不再无声。
+                if block.is_empty() {
+                    tracing::warn!(
+                        role = kind.name(),
+                        prompt_key = key,
+                        "role prompt missing from prompts.json — this role's system \
+                         prompt will run without its role identity"
+                    );
+                }
+                block
             }
         };
         let mut tools = registry.names();
@@ -438,5 +451,69 @@ mod tests {
                 "auditor must not be able to call `{name}`"
             );
         }
+    }
+
+    /// F1 锁步（cli 2026-10-06 查实的缺陷）：Auditor 的 `role_block` 曾**静默为空**
+    /// —— `prompt_key()` 返回 `"A-验收"`，但 `prompts.json` 里并没有这个键，
+    /// `cfg.prompt()` 查不到就返回空串，于是整份「掌舵人 + 质量闸门」身份被无声
+    /// 抹掉（`_note` 里也自述该模板被清过）。此前没有测试能发现它，因为旧断言只
+    /// 锁了 `prompt_key()` 这个**字符串常量**，不锁它对应的提示词真存在。
+    ///
+    /// 这里锁死「角色 → 提示词键 → 非空正文」整条链：改 `prompts.json` 删掉该键
+    /// 就会红。
+    #[test]
+    fn auditor_role_prompt_is_actually_present_and_non_empty() {
+        use lingmiao_core::config::PromptField;
+        let cfg = Config::load_default().unwrap();
+        let key = RoleKind::Auditor.prompt_key();
+        assert_eq!(key, "A-验收");
+        let block = cfg.prompt(key, PromptField::System);
+        assert!(
+            !block.is_empty(),
+            "`{key}` must exist in prompts.json — an empty role block silently \
+             strips the whole helmsman identity from the Auditor system prompt"
+        );
+        // 身份与三层验证是掌舵人提示词的核心；丢了等于退化成操作验收员。
+        assert!(
+            block.contains("掌舵人"),
+            "role block must keep the helmsman identity"
+        );
+        assert!(
+            block.contains("三层验证"),
+            "role block must keep three-layer verification"
+        );
+        assert!(
+            block.contains("extracted_constraints"),
+            "role block must still ask the Auditor to emit extracted_constraints"
+        );
+        // Main 无角色块（空键 → 空串），与 Auditor 形成对照。
+        assert!(RoleKind::Main.prompt_key().is_empty());
+        assert!(
+            cfg.prompt(RoleKind::Main.prompt_key(), PromptField::System)
+                .is_empty()
+        );
+    }
+
+    /// 上面那条只证「提示词非空」；这条把最后一环也钉死：C 模板确实有
+    /// `{role_block}` 槽，且把 Auditor 的角色块填进去后，渲染出的 system 里
+    /// **真的出现**掌舵人身份（不需要 LLM client，纯字符串）。两条合起来就是
+    /// 「角色 → 提示词键 → 非空正文 → 注入 system」的完整链。
+    #[test]
+    fn auditor_role_block_reaches_the_rendered_system_prompt() {
+        use lingmiao_core::config::PromptField;
+        let cfg = Config::load_default().unwrap();
+        let template = cfg.prompt(crate::STAGE_C, PromptField::System);
+        assert!(
+            template.contains("{role_block}"),
+            "C 模板必须留 `{{role_block}}` 槽，否则角色提示词无处注入"
+        );
+        let block = cfg.prompt(RoleKind::Auditor.prompt_key(), PromptField::System);
+        let rendered =
+            crate::engine::fill_prompt(template, &[("role_block", block), ("base", "（身份块）")]);
+        assert!(!rendered.contains("{role_block}"), "槽必须被替换干净");
+        assert!(
+            rendered.contains("掌舵人") && rendered.contains("三层验证"),
+            "渲染后的 Auditor system 必须含掌舵人身份与三层验证"
+        );
     }
 }

@@ -32,8 +32,8 @@ use super::role::{RoleOutput, RoleSet};
 use super::state_md::{StateMd, StateMdInput};
 use super::store::AutonomousStore;
 use super::types::{
-    AuditorResult, AutonomousRequest, AutonomousSession, AutonomousTask, FeedbackIssue,
-    IterationResult, SessionStatus, TaskSeed,
+    AuditorResult, AutoConstraint, AutonomousRequest, AutonomousSession, AutonomousTask,
+    FeedbackIssue, IterationResult, SessionStatus, TaskSeed,
 };
 
 /// Main 产出摘要注入 Auditor 的字符上限（原版 `[:3000]`）。
@@ -508,6 +508,18 @@ impl AutonomousLoop {
                 it.auditor_output = role_output_json(&auditor_out);
                 let verdict = parse_auditor_result(&auditor_out);
                 it.auditor_result = verdict.clone();
+                // 第四层「当场」约束落盘（原版在 `_parse_auditor_result` 内直接
+                // 写 auto_learned.json）。失败只告警，不影响主循环。
+                if !verdict.extracted_constraints.is_empty()
+                    && let Err(e) = meta::record_extracted_constraints(
+                        &meta_paths,
+                        &session.id,
+                        it.iteration,
+                        &verdict.extracted_constraints,
+                    )
+                {
+                    log(&format!("ITER extracted_constraints persist failed: {e}"));
+                }
                 log(&format!(
                     "ITER {} AUDITOR done · continue={}",
                     it.iteration, verdict.continue_
@@ -956,6 +968,18 @@ impl AutonomousLoop {
             let auditor_prompt = self.build_auditor_prompt(&session, &state_md, &task, &main_out);
             auditor_out = roles.auditor.run(&auditor_prompt).await;
             let v = parse_auditor_result(&auditor_out);
+            // 第四层「当场」约束落盘（与 auto 同口径；round 模式也在会话级
+            // 学习，原版两条路径共用 `auto_learned.json`）。
+            if !v.extracted_constraints.is_empty()
+                && let Err(e) = meta::record_extracted_constraints(
+                    &MetaPaths::for_memory_dir(&paths.memory_dir),
+                    &session.id,
+                    retry_count,
+                    &v.extracted_constraints,
+                )
+            {
+                tracing::warn!("round extracted_constraints persist failed: {e}");
+            }
             self.emit_round(
                 format!(
                     "🔍 Auditor·{label}｜continue={}｜{}",
@@ -1131,10 +1155,11 @@ const AUDITOR_INSTRUCTION_IMPLICIT: &str = "0. 先用 git diff --stat HEAD 和 l
    - Main 的改动是否真的必要？有没有在「修复不存在的问题」？\n\
    - 如果改动无实际价值（仅格式/重命名/空壳），即使看起来完整也必须 continue=true\n\
 9. ⚠️ 掌舵人职责 — 你的 feedback 就是 Main 下一轮的提示词：\n\
-   - 先做方向对齐：对照总目标和成功标准，判断 Main 当前方向是否符合用户输入和预期。方向走偏比细节瑕疵更严重，必须 continue=true 并给出拉回正轨的具体指令。\n\
+   - 先做方向对齐：对照总目标和成功标准，判断 Main 当前方向是否符合用户输入和预期。方向走偏（做了用户没要求的东西、或没做用户要求的核心产出）比细节瑕疵更严重，必须 continue=true 并给出拉回正轨的具体指令。\n\
    - 不只验收操作有效性，还要评估设计质量：是否有更优的架构/接口/命名选择？设计平庸但功能可用时，给出设计级改进建议（方案+理由+涉及文件）。\n\
    - feedback 必须具体：包含文件路径、行号、要改什么、怎么改\n\
    - 不要写「修复错误处理」— 写「在 app.py 第 342 行加 try/except」\n\
+   - 不要写「继续完善」— 写「修改 factory.py 第 45 行，新增 X 模型」\n\
    - 用 search_memory 检索用户的历史决策和偏好，融入 feedback\n\
 10. ⚠️ 离线模式 — 当 Main 说「需要用户拍板」「等待确认」时：\n\
    - 步骤 1：用 search_memory 搜索 chat 分区的 decision/preference\n\
@@ -1226,6 +1251,47 @@ pub fn parse_auditor_result(out: &RoleOutput) -> AuditorResult {
                 .collect()
         })
         .unwrap_or_default();
+    // 第四层 EPO-Safe 的「当场」路径：Auditor 按提示词直接输出的
+    // `extracted_constraints`（原版 `_parse_auditor_result` 会读它并落
+    // `auto_learned.json`）。这里只解析出**内容**（保持本函数是纯函数），
+    // 落盘由调用点拿到 `MetaPaths` 时做 —— 见
+    // [`super::meta::record_extracted_constraints`]。仅接受带非空 `condition`
+    // 的条目（原版 `rc.get("condition")` 真值判断）。
+    let extracted_constraints: Vec<AutoConstraint> = data
+        .get("extracted_constraints")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|rc| {
+                    rc.as_object()?;
+                    let condition = rc
+                        .get("condition")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if condition.is_empty() {
+                        return None;
+                    }
+                    Some(AutoConstraint {
+                        condition,
+                        prohibited_action: rc
+                            .get("prohibited_action")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        reason: rc
+                            .get("reason")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                        active: true,
+                        ..Default::default()
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     AuditorResult {
         continue_: data
             .get("continue")
@@ -1243,6 +1309,7 @@ pub fn parse_auditor_result(out: &RoleOutput) -> AuditorResult {
             .unwrap_or_default(),
         counterfactual: data.get("counterfactual").cloned().unwrap_or(Value::Null),
         issues,
+        extracted_constraints,
         fault: out.fault.clone(),
     }
 }
@@ -1394,6 +1461,62 @@ mod tests {
         assert_eq!(r.issues.len(), 1);
         assert_eq!(r.issues[0].category, "quality");
         assert_eq!(r.issues[0].file, "a.rs");
+    }
+
+    /// F2：Auditor 按提示词第 4 层输出的 `extracted_constraints` 必须被解析出来
+    /// （原版 `_parse_auditor_result` 会读它并落 auto_learned.json）。此前 Rust
+    /// 解析层完全不接这个字段 —— 提示词要求产出、解析层直接丢弃。
+    #[test]
+    fn auditor_result_parses_extracted_constraints_skipping_blank_conditions() {
+        let out = RoleOutput {
+            response: "```json\n{\"continue\": true, \"feedback\": \"x\", \
+                 \"extracted_constraints\": [\
+                   {\"condition\": \"当 Main 声称修复了不存在的问题时\", \
+                    \"prohibited_action\": \"禁止无 git diff 证据就声称已修复\", \
+                    \"reason\": \"防幻影修复\"}, \
+                   {\"condition\": \"  \", \"prohibited_action\": \"x\", \"reason\": \"y\"}, \
+                   {\"prohibited_action\": \"没有 condition 的条目应被丢弃\"}\
+                 ]}\n```"
+                .to_string(),
+            ..Default::default()
+        };
+        let r = parse_auditor_result(&out);
+        assert_eq!(
+            r.extracted_constraints.len(),
+            1,
+            "only entries with a non-blank `condition` are kept"
+        );
+        let c = &r.extracted_constraints[0];
+        assert!(c.condition.contains("不存在的问题"));
+        assert!(c.prohibited_action.contains("git diff"));
+        assert!(c.active, "extracted constraints start active");
+    }
+
+    /// 锁步：Auditor 两个 user 指令块必须保留原版 `_run_auditor` 的「掌舵人职责」
+    /// 与「离线模式」要点（2026-10-06 逐字核对原版时发现 IMPLICIT 漏了正反例的
+    /// 「继续完善」一行）。这条测试把四层结构与两条掌舵要点钉死，防止以后再改
+    /// 指令块时静默丢条目 —— 与 `role.rs` 那两条锁 `role_block` 的测试互补：
+    /// 那两条管 **system** 层身份，这两条管 **user** 层指令。
+    #[test]
+    fn auditor_instruction_blocks_keep_the_helmsman_duties() {
+        // 完整性：两条指令块都不得为空。
+        assert!(!AUDITOR_INSTRUCTION_EXPLICIT.is_empty());
+        assert!(!AUDITOR_INSTRUCTION_IMPLICIT.is_empty());
+
+        // 「掌舵人职责」（第 9 条）与「离线模式」（第 10 条）必须在 IMPLICIT 块里。
+        assert!(AUDITOR_INSTRUCTION_IMPLICIT.contains("掌舵人职责"));
+        assert!(AUDITOR_INSTRUCTION_IMPLICIT.contains("离线模式"));
+        assert!(AUDITOR_INSTRUCTION_IMPLICIT.contains("反事实检查"));
+        assert!(AUDITOR_INSTRUCTION_IMPLICIT.contains("环境搭建"));
+
+        // 「正反例速查」的两条反面写法都必须还在（原版逐字：不要「修复错误处理」
+        // / 不要「继续完善」）—— 曾漏掉后者。
+        assert!(AUDITOR_INSTRUCTION_IMPLICIT.contains("修复错误处理"));
+        assert!(AUDITOR_INSTRUCTION_IMPLICIT.contains("继续完善"));
+
+        // EXPLICIT 块同样保留方向对齐与反事实检查（掌舵职责的精简版）。
+        assert!(AUDITOR_INSTRUCTION_EXPLICIT.contains("方向对齐"));
+        assert!(AUDITOR_INSTRUCTION_EXPLICIT.contains("反事实检查"));
     }
 
     #[test]
