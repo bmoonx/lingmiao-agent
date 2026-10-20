@@ -23,8 +23,9 @@ use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-use crate::app::{display_width, truncate};
+use crate::app::display_width;
 use crate::theme::{ACCENT, CODE_FG, LINK, TEXT_MUTED};
+use crate::wrap::wrap_cjk;
 
 /// Dim colour for structural chrome (quote bars, table rules, list bullets).
 /// Routed through the `theme::` token layer — nobody in the widget layer picks a
@@ -32,17 +33,37 @@ use crate::theme::{ACCENT, CODE_FG, LINK, TEXT_MUTED};
 const DIM: Color = TEXT_MUTED;
 /// Width of a rendered thematic break (`---`).
 const RULE_W: usize = 30;
-/// Upper bound for a rendered table column, so a wide cell cannot blow the
-/// conversation pane apart.
+/// Upper bound for a rendered table column's **natural** width, so one long cell
+/// cannot make the table needlessly wide. It is a soft cap only: a cell that
+/// exceeds it is wrapped onto extra rows, never cut — the old code truncated at
+/// this width and silently dropped the rest of the text (cli 2026-10-19
+/// 「表格排版会吞掉字」).
 const MAX_COL: usize = 24;
+/// A column never shrinks below this when squeezing a table into the pane —
+/// narrower than this a cell wraps to one glyph per line, which reads worse than
+/// the definition-list fallback.
+const MIN_COL: usize = 4;
 
-/// Parse `md` and render it into owned ratatui lines.
+/// Parse `md` and render it into owned ratatui lines (tables at natural width).
 pub fn markdown_lines(md: &str) -> Vec<Line<'static>> {
+    markdown_lines_width(md, None)
+}
+
+/// Like [`markdown_lines`], but a **table** is sized to fit a conversation pane
+/// `width` columns wide: its widest columns shrink (never below [`MIN_COL`]) and
+/// a table that still cannot fit — too many columns, or the pane is very narrow —
+/// degrades to a definition list instead of being shredded by the outer wrap.
+///
+/// `width == None` (tests, previews) renders tables at their natural width.
+pub fn markdown_lines_width(md: &str, width: Option<usize>) -> Vec<Line<'static>> {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TASKLISTS);
-    let mut r = Renderer::default();
+    let mut r = Renderer {
+        pane_width: width,
+        ..Default::default()
+    };
     for ev in Parser::new_ext(md, opts) {
         r.event(ev);
     }
@@ -86,6 +107,9 @@ struct Renderer {
     pending_prefix: Option<String>,
     code: Option<CodeBlock>,
     table: Option<Table>,
+    /// The conversation pane width a table must fit into (`None` = natural
+    /// width, the tests / preview case).
+    pane_width: Option<usize>,
 }
 
 impl Renderer {
@@ -358,6 +382,19 @@ impl Renderer {
     }
 
     /// Draw the accumulated table as a box-drawn grid with aligned columns.
+    ///
+    /// Two hard rules, both learned from cli 2026-10-19「表格排版会吞掉字」:
+    ///
+    /// 1. **Nothing is ever dropped.** A cell wider than its column is *wrapped*
+    ///    onto extra grid rows (the old code ran `truncate(cell, width)` and threw
+    ///    the remainder away — a long Chinese cell lost half its text with no
+    ///    ellipsis, so the table silently lied).
+    /// 2. **The table fits the pane.** Columns are sized from the content, capped
+    ///    at [`MAX_COL`], then squeezed proportionally until the whole grid fits
+    ///    `pane_width` (never below [`MIN_COL`]). If it still cannot fit — too
+    ///    many columns for the pane, or a very narrow pane — the table degrades to
+    ///    a definition list (`head: value` lines) rather than being shredded by
+    ///    the outer line wrap into unreadable fragments.
     fn render_table(&mut self, t: &Table) {
         let rows: Vec<&Vec<String>> = t.head.iter().chain(t.body.iter()).collect();
         if rows.is_empty() {
@@ -367,10 +404,35 @@ impl Renderer {
         if cols == 0 {
             return;
         }
+        // Natural width per column: the widest cell. The cap is the pane itself
+        // (a cell may not be wider than the pane allows), so a wide terminal lets a
+        // long cell stay on one row instead of being folded at an arbitrary
+        // [`MAX_COL`]; the squeezing below then shares the pane fairly between the
+        // columns. Without a pane (tests / previews) the fixed [`MAX_COL`] cap
+        // keeps an essay cell from making the grid absurdly wide.
+        let cap = self.pane_width.unwrap_or(MAX_COL);
         let mut widths = vec![0usize; cols];
         for row in &rows {
             for (i, c) in row.iter().enumerate() {
-                widths[i] = widths[i].max(display_width(c)).min(MAX_COL);
+                widths[i] = widths[i].max(display_width(c).min(cap));
+            }
+        }
+        for w in widths.iter_mut() {
+            *w = (*w).max(1);
+        }
+        // Fit the pane. The grid is `left │ c │ c │ right`: `1 + Σ(w + 2) + cols`
+        // columns, i.e. `Σ(w) + 3*cols + 1` — every cell carries one space of
+        // padding either side *and* the separators are their own columns.
+        if let Some(pane) = self.pane_width {
+            let chrome = 3 * cols + 1;
+            let available = pane.saturating_sub(chrome);
+            if available < MIN_COL * cols || available == 0 {
+                self.render_table_as_list(t, &rows);
+                return;
+            }
+            let sum: usize = widths.iter().sum();
+            if sum > available {
+                widths = squeeze(&widths, available, MIN_COL);
             }
         }
         let border = Style::default().fg(DIM);
@@ -386,24 +448,80 @@ impl Renderer {
                     border,
                 )));
             }
-            let mut spans = vec![Span::styled("│", border)];
-            for (i, w) in widths.iter().enumerate() {
-                let cell = truncate(row.get(i).map(String::as_str).unwrap_or(""), *w);
-                let padded = pad(&cell, *w);
-                let style = if ri < head_n {
-                    Style::default().add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default()
-                };
-                spans.push(Span::styled(format!(" {padded} "), style));
-                spans.push(Span::styled("│", border));
+            // Wrap every cell to its column width; the row is as tall as its
+            // tallest cell, and short cells pad out on their own lines.
+            let cells: Vec<Vec<String>> = widths
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    let raw = row.get(i).map(String::as_str).unwrap_or("");
+                    // A cell's own newlines would break the grid — flatten them.
+                    let flat = raw.split('\n').collect::<Vec<_>>().join(" ");
+                    wrap_cjk(flat.trim(), *w)
+                })
+                .collect();
+            let height = cells.iter().map(Vec::len).max().unwrap_or(1).max(1);
+            for li in 0..height {
+                let mut spans = vec![Span::styled("│", border)];
+                for (i, w) in widths.iter().enumerate() {
+                    let text = cells[i].get(li).map(String::as_str).unwrap_or("");
+                    let padded = pad(text, *w);
+                    let style = if ri < head_n {
+                        Style::default().add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    spans.push(Span::styled(format!(" {padded} "), style));
+                    spans.push(Span::styled("│", border));
+                }
+                self.lines.push(Line::from(spans));
             }
-            self.lines.push(Line::from(spans));
         }
         self.lines.push(Line::from(Span::styled(
             hline('└', '┴', '┘', &widths),
             border,
         )));
+    }
+
+    /// The degraded rendering for a table too wide for the pane: each row becomes
+    /// a definition list — `**{head}**：{cell}` — so **every** value survives as
+    /// readable text (wrapped by the outer `wrap_line`) instead of the grid being
+    /// torn into fragments (`cli 2026-10-19` 吞字).
+    fn render_table_as_list(&mut self, t: &Table, rows: &[&Vec<String>]) {
+        let heads: Vec<String> = (0..t.head.first().map(Vec::len).unwrap_or(0))
+            .map(|i| {
+                t.head
+                    .first()
+                    .and_then(|h| h.get(i))
+                    .cloned()
+                    .unwrap_or_default()
+            })
+            .collect();
+        let body_start = t.head.len();
+        for row in rows.iter().skip(body_start) {
+            if row.iter().all(|c| c.trim().is_empty()) {
+                continue;
+            }
+            for (i, cell) in row.iter().enumerate() {
+                let cell = cell.trim();
+                if cell.is_empty() {
+                    continue;
+                }
+                let label = heads.get(i).map(String::as_str).unwrap_or("").trim();
+                let mut spans: Vec<Span<'static>> = Vec::new();
+                if label.is_empty() {
+                    spans.push(Span::styled("• ", Style::default().fg(DIM)));
+                } else {
+                    spans.push(Span::styled("• ", Style::default().fg(DIM)));
+                    spans.push(Span::styled(
+                        format!("{label}："),
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ));
+                }
+                spans.push(Span::raw(cell.to_string()));
+                self.lines.push(Line::from(spans));
+            }
+        }
     }
 
     fn finish(mut self) -> Vec<Line<'static>> {
@@ -421,6 +539,33 @@ fn hline(left: char, sep: char, right: char, widths: &[usize]) -> String {
         s.push(if i + 1 == widths.len() { right } else { sep });
     }
     s
+}
+
+/// Shrink `widths` so their sum is at most `available`, taking the excess from
+/// the widest columns first and never dropping a column below `min`.
+///
+/// Proportional squeezing alone would starve a narrow column (one CJK glyph per
+/// line); taking one column at a time from the current widest keeps the columns
+/// balanced, so every cell still wraps at a readable width.
+fn squeeze(widths: &[usize], available: usize, min: usize) -> Vec<usize> {
+    let mut out = widths.to_vec();
+    // Shrink in display columns; a column cannot go under `min`, so first give
+    // back the "slack" above `min`, widest column first.
+    let mut excess = out.iter().sum::<usize>().saturating_sub(available);
+    while excess > 0 {
+        let Some(fattest) = out
+            .iter()
+            .enumerate()
+            .filter(|(_, w)| **w > min)
+            .max_by_key(|(i, w)| (**w, std::cmp::Reverse(*i)))
+            .map(|(i, _)| i)
+        else {
+            break;
+        };
+        out[fattest] -= 1;
+        excess -= 1;
+    }
+    out
 }
 
 /// Right-pad `s` to `width` *display* columns (CJK counted as 2).
@@ -537,6 +682,84 @@ mod tests {
             "bullets / quote bar / rule are muted"
         );
         assert!(fgs.contains(&CODE_FG), "inline code is CODE_FG");
+    }
+
+    /// All rendered text with the grid chrome (`│ ┌ ┬ ┐ ├ ┼ ┤ └ ┴ ┘ ─`) removed,
+    /// so a cell can be searched for even when it wrapped across grid rows.
+    fn table_text(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<String>()
+            .chars()
+            .filter(|c| !"│┌┬┐├┼┤└┴┘─".contains(*c))
+            .collect()
+    }
+
+    /// A cell wider than its column is **wrapped**, never cut: the old code ran
+    /// `truncate(cell, width)` and threw the tail away with no ellipsis, so a long
+    /// Chinese cell silently lost half its text (cli 2026-10-19「表格排版会吞掉字」).
+    #[test]
+    fn table_cells_wrap_instead_of_being_truncated() {
+        let md = "| 项目 | 说明 |\n|---|---|\n| 引擎硬拦 | 工具白名单、先读后写、路径沙箱三道物理拦截 |\n";
+        let joined = table_text(&markdown_lines(md));
+        assert!(
+            joined.contains("工具白名单、先读后写、路"),
+            "cell keeps its first line: {joined:?}"
+        );
+        assert!(
+            joined.contains("径沙箱三道物理拦截"),
+            "the overflow is wrapped onto a second row, not dropped: {joined:?}"
+        );
+    }
+
+    /// A table is laid out to fit the conversation pane: no rendered line is
+    /// wider than the width it was given (a wider grid used to be torn apart by
+    /// the outer `wrap_line`, splitting cells mid-glyph).
+    #[test]
+    fn a_table_fits_the_pane_it_is_given() {
+        let md = "| 阶段 | 工具数 | 说明 | 备注 | 来源 | 时间 | 状态 |\n|---|---|---|---|---|---|---|\n| 组织上下文 | 14 | 检索记忆与约束，每轮都跑一遍 | 见设计文档第八节 | 流水线 | 2026-10-19 | 已完成 |\n";
+        for width in [60usize, 80, 120] {
+            for line in markdown_lines_width(md, Some(width)) {
+                let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                let w = display_width(&text);
+                assert!(w <= width, "line {w} > pane {width}: {text:?}");
+            }
+        }
+    }
+
+    /// When the grid genuinely cannot fit — more columns than the pane can hold —
+    /// the table degrades to a definition list so every value stays readable
+    /// instead of the grid being shredded into fragments.
+    #[test]
+    fn a_too_wide_table_degrades_to_a_list() {
+        let md = "| 一 | 二 | 三 | 四 | 五 | 六 | 七 | 八 | 九 | 十 | 十一 | 十二 |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n| 甲 | 乙 | 丙 | 丁 | 戊 | 己 | 庚 | 辛 | 壬 | 癸 | 子 | 丑 |\n";
+        let lines = markdown_lines_width(md, Some(40));
+        let joined: String = lines
+            .iter()
+            .map(|l| {
+                l.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!joined.contains('┌'), "no grid when it cannot fit");
+        assert!(joined.contains("• 一：甲"), "head: value list: {joined:?}");
+        assert!(joined.contains("• 十二：丑"), "last column kept too");
+    }
+
+    /// Every character of every cell survives even when the pane is narrow enough
+    /// to wrap the grid hard — the old truncation lost text in exactly this case.
+    #[test]
+    fn a_narrow_pane_still_keeps_every_cell_character() {
+        let md = "| 阶段 | 工具数 | 说明 | 备注 |\n|---|---|---|---|\n| 组织上下文 | 14 | 检索记忆 | 见文档 |\n";
+        let joined = table_text(&markdown_lines_width(md, Some(30)));
+        for piece in ["组", "织", "上", "下", "文", "检索", "记忆", "见文", "档"] {
+            assert!(joined.contains(piece), "{piece} kept: {joined:?}");
+        }
     }
 
     /// A block quote dims only its `│ ` bar — the quoted *text* stays primary.

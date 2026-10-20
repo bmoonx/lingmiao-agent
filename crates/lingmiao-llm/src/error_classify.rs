@@ -30,6 +30,8 @@ pub const CTX_OVERFLOW: &str = "context_overflow";
 pub const RATE_LIMIT: &str = "rate_limit";
 /// 认证/权限失败（401/403 / auth）。
 pub const AUTH: &str = "auth";
+/// 账户余额 / 计费不足（402 / Insufficient Balance）。
+pub const BILLING: &str = "billing";
 /// 网络错误（连接/超时/代理）。
 pub const NETWORK: &str = "network";
 /// 服务端异常（5xx）。
@@ -42,11 +44,12 @@ pub const EMPTY_RESPONSE: &str = "empty_response";
 pub const UNKNOWN: &str = "unknown";
 
 /// Every category, in priority order (mirrors the classifier's checks).
-pub const CATEGORIES: [&str; 8] = [
+pub const CATEGORIES: [&str; 9] = [
     CTX_OVERFLOW,
     EMPTY_RESPONSE,
     RATE_LIMIT,
     AUTH,
+    BILLING,
     NETWORK,
     UPSTREAM,
     BAD_REQUEST,
@@ -59,6 +62,7 @@ pub fn category_label(category: &str) -> &'static str {
         CTX_OVERFLOW => "上下文超限",
         RATE_LIMIT => "限流/频率限制",
         AUTH => "认证/权限失败",
+        BILLING => "账户余额/计费不足",
         NETWORK => "网络错误",
         UPSTREAM => "服务端异常(5xx)",
         BAD_REQUEST => "请求无效(400)",
@@ -75,6 +79,9 @@ pub fn category_advice(category: &str) -> &'static str {
         }
         RATE_LIMIT => "请求过于频繁或触发配额。建议稍后重试，或降低并发。",
         AUTH => "API Key 无效、过期或权限不足。请检查 .env 或当前配置的 Key。",
+        BILLING => {
+            "账户余额不足或计费额度耗尽（HTTP 402 / Insufficient Balance）。请充值、切换有余额的 Key，或更换模型后重试。"
+        }
         NETWORK => "连接失败/超时/代理异常。请检查网络与代理设置（socks/proxy）。",
         UPSTREAM => "服务商临时故障。建议稍后重试。",
         BAD_REQUEST => "请求参数非法（非上下文类）。请检查模型名/参数。",
@@ -151,7 +158,20 @@ pub fn classify_llm_error(status: Option<u16>, detail: &str) -> LlmErrorInfo {
     {
         AUTH
     }
-    // 5. 网络错误（无状态码时按文本判断）
+    // 5. 账户余额 / 计费不足 —— cli 2026-10-20（P0「Kimi 沉淀卡死」实为 DeepSeek
+    // 余额不足 402）: 402 此前落进 UNKNOWN，用户只看到「未知错误 · 把日志发回
+    // 排查」，完全看不懂是**账户没钱**。单独成类，advice 直接指向充值/换 Key。
+    // 放在 AUTH 之后（401/403 仍是认证问题）、NETWORK 之前（402 是 provider 明
+    // 确返回的计费语义，不是网络故障）。
+    else if status == Some(402)
+        || has("insufficient balance")
+        || has("quota exceeded")
+        || has("out of credit")
+        || has("billing")
+    {
+        BILLING
+    }
+    // 6. 网络错误（无状态码时按文本判断）
     else if status.is_none()
         && [
             "connect",
@@ -167,11 +187,11 @@ pub fn classify_llm_error(status: Option<u16>, detail: &str) -> LlmErrorInfo {
     {
         NETWORK
     }
-    // 6. 上游 5xx
+    // 7. 上游 5xx
     else if matches!(status, Some(c) if (500..=599).contains(&c)) {
         UPSTREAM
     }
-    // 7. 请求无效 400
+    // 8. 请求无效 400
     else if status == Some(400) || has("badrequest") {
         BAD_REQUEST
     } else {
@@ -292,6 +312,10 @@ mod tests {
         );
         assert_eq!(classify_llm_error(Some(401), "bad key").category, AUTH);
         assert_eq!(
+            classify_llm_error(Some(402), "Insufficient Balance").category,
+            BILLING
+        );
+        assert_eq!(
             classify_llm_error(None, "connection reset by peer").category,
             NETWORK
         );
@@ -334,6 +358,33 @@ mod tests {
             classify_llm_error(Some(400), "context_length_exceeded").category,
             CTX_OVERFLOW
         );
+    }
+
+    #[test]
+    fn billing_is_classified_not_unknown() {
+        // cli 2026-10-20（P0「Kimi 沉淀卡死」实为 DeepSeek 402 余额不足）: 402
+        // 此前落 UNKNOWN，用户看不懂是账户没钱。锁步：HTTP 402 与常见的计费文案
+        // 都必须归 BILLING，且不得误伤相邻的 AUTH / UNKNOWN。
+        assert_eq!(classify_llm_error(Some(402), "").category, BILLING);
+        assert_eq!(
+            classify_llm_error(Some(402), r#"{"error":{"message":"Insufficient Balance"}}"#)
+                .category,
+            BILLING
+        );
+        assert_eq!(
+            classify_llm_error(Some(400), "insufficient balance in account").category,
+            BILLING
+        );
+        assert_eq!(
+            classify_llm_error(None, "quota exceeded for this key").category,
+            BILLING
+        );
+        // 不误伤：401 仍是认证、与计费无关的文本仍是未知。
+        assert_eq!(
+            classify_llm_error(Some(401), "Insufficient Balance").category,
+            AUTH
+        );
+        assert_eq!(classify_llm_error(None, "???").category, UNKNOWN);
     }
 
     #[test]

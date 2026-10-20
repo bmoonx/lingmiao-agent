@@ -54,7 +54,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
 
 use crate::editor::Editor;
-use crate::markdown::markdown_lines;
+use crate::markdown::markdown_lines_width;
 use crate::motion::{activity_verb, now_hms, tip_at};
 use crate::session_input::SessionInput;
 use crate::theme::{
@@ -363,6 +363,16 @@ fn stage_index(stage: &str) -> Option<usize> {
 /// the transcript order.
 enum Item {
     Line(Line<'static>),
+    /// An **assistant reply** (T12 富文本): kept as its *source markdown* rather
+    /// than pre-rendered lines, so it is laid out at the **current** pane width on
+    /// every render — a resized terminal re-fits the reply, and a table's column
+    /// widths follow the pane instead of presenting the widths that happened to be
+    /// in force when the reply arrived (cli 2026-10-19「表格排版会吞掉字」).
+    Answer {
+        /// The pipeline stage that produced the reply — drives its `丨…` tag.
+        stage: String,
+        text: String,
+    },
     /// A **user turn** (§12.11): the reverse-video prompt bar — its own variant
     /// (not a bare [`Item::Line`]) so the transcript keeps the bar's own spans
     /// and the fold/layout code can treat it as a distinct block.
@@ -553,10 +563,25 @@ pub struct App {
     turn_tools: u64,
     /// When the current turn started (for the tail line's real elapsed time).
     turn_started: Instant,
+    /// 本轮是否已有任何**工作阶段正文产出**（cli 2026-10-20「零产出显著提示」）：
+    /// 任一 工作阶段 `content` 增量落进 `streaming` 即置 `true`；`begin_turn` 归零。
+    ///
+    /// 402/余额不足那类故障里模型一个字都没说（tokens={input:0, output:0}），
+    /// 于是 `on_turn_done` 打一条 `◜ done` 就完事 —— 用户只看到 spinner 转完，
+    /// 没有任何「这轮没说出话」的提示（P0「卡在沉淀中」观感的另一半）。`on_turn_done`
+    /// 据此打一条显著红条。不能用 `tokens_out` 判断：它是 session 累计量，`begin_turn`
+    /// 不清零，读到的是历史总量而非本轮。
+    turn_had_output: bool,
     /// When the app started — drives the idle tip rotation (§14-P3): the tip in
     /// the empty input box steps on every `TIP_COOLDOWN`.
     tip_started: Instant,
     error: Option<String>,
+    /// **计费/余额类故障的常驻提醒**（cli 2026-10-20「错误只占 transcript、不占
+    /// footer 常驻位」）：当本轮以 HTTP 402 / 余额不足收尾时写入，footer 左槽在
+    /// `Idle` 时优先显示 `计费不足 · 见上方错误`（WARN 色）——否则 402 只留一条
+    /// 会滚走的 transcript 红字，用户下一次看屏幕时已经不知道刚才为何没产出。
+    /// `begin_turn`（新一轮）清空。
+    billing_notice: Option<String>,
     /// Committed conversation items (user / assistant / tool cards / notices /
     /// collapsible thinking blocks §12.7).
     scrollback: Vec<Item>,
@@ -633,6 +658,10 @@ pub struct App {
     /// Whether `ctrl+x` armed the "send now" chord (`ctrl+x ctrl+s`); cleared by
     /// any other key.
     send_now_armed: bool,
+    /// Whether `ctrl+x` armed the **withdraw** chord (`ctrl+x ctrl+u`, cli
+    /// 2026-10-20「加一个把排队队列里最后一条消息撤回的快捷键」); cleared by any
+    /// other key, exactly like [`Self::send_now_armed`].
+    withdraw_armed: bool,
     // ── reverse history search (cli 2026-09-27, CC `ctrl+r`) ──────
     /// `ctrl+r` opens CC's **search prompts** overlay over the input box: type
     /// to filter submitted history (substring, case-insensitive), ↑/↓ pick, Enter
@@ -711,8 +740,10 @@ impl App {
             auto_round: 0,
             turn_tools: 0,
             turn_started: Instant::now(),
+            turn_had_output: false,
             tip_started: Instant::now(),
             error: None,
+            billing_notice: None,
             scrollback: Vec::new(),
             width: 100,
             height: 40,
@@ -737,6 +768,7 @@ impl App {
             menu_selected: 0,
             queue: Vec::new(),
             send_now_armed: false,
+            withdraw_armed: false,
             search_open: false,
             search_query: String::new(),
             search_selected: 0,
@@ -835,6 +867,11 @@ impl App {
         match it {
             Item::Line(l) => vec![l.clone()],
             Item::UserTurn { lines } => lines.clone(),
+            // The reply is re-laid out at the **current** width: a table's column
+            // widths depend on the pane, so caching the lines a reply produced at
+            // push time would freeze the widths of whatever the terminal happened
+            // to be then (cli 2026-10-19「表格排版会吞掉字」).
+            Item::Answer { stage, text } => answer_lines(stage, text, width),
             Item::Thinking { stage, text, secs } => {
                 thinking_lines(stage, text, *secs, self.thinking_expanded, width)
             }
@@ -962,19 +999,37 @@ impl App {
         // Ctrl+X Ctrl+S sends the front queued message now (cli 2026-09-24 ③,
         // CC 「ctrl+x ctrl+s to send now」): Ctrl+X arms, Ctrl+S fires; any other
         // key disarms the chord.
+        //
+        // cli 2026-10-20（「加一个把排队队列里最后一条消息撤回的快捷键」）: the same
+        // `ctrl+x` arm also gates `ctrl+u` → **withdraw the newest queued
+        // message**. Two chords share one arm on purpose — `ctrl+u` alone stays
+        // emacs' `kill-to-line-start` (§②), so withdraw never collides with the
+        // line editor.
         if ctrl && key.code == KeyCode::Char('x') {
             self.send_now_armed = true;
+            self.withdraw_armed = true;
             return Action::None;
         }
         if ctrl && key.code == KeyCode::Char('s') {
             let armed = self.send_now_armed;
             self.send_now_armed = false;
+            self.withdraw_armed = false;
             if armed && !self.queue.is_empty() {
                 return Action::SendQueuedNow;
             }
             return Action::None;
         }
+        // Withdraw the newest queued message (`ctrl+x ctrl+u`). Purely local
+        // state — the run loop never sees the withdrawn line, so this returns
+        // `Action::None` and reports through the transcript.
+        if ctrl && key.code == KeyCode::Char('u') && self.withdraw_armed {
+            self.withdraw_armed = false;
+            self.send_now_armed = false;
+            self.withdraw_last_queued();
+            return Action::None;
+        }
         self.send_now_armed = false;
+        self.withdraw_armed = false;
         // Ctrl+O toggles every fold — the reasoning blocks (§12.7) *and* the
         // collapsed tool output (§12.10 P1-a) — so one key reveals all hidden
         // detail. Works whether idle or mid-turn.
@@ -1687,6 +1742,7 @@ impl App {
                             // first, so `∴` lines stay above the `●` reply.
                             self.commit_thinking();
                             self.stream_stage = stage.clone();
+                            self.turn_had_output = true;
                             self.streaming.push_str(text);
                         }
                         "reasoning" => {
@@ -1951,6 +2007,20 @@ impl App {
                     // recorded error here, so no fault is ever swallowed.
                     if let Some(err) = self.error.clone() {
                         self.push_error_detail(&err);
+                        // 402/余额类故障：把原因钉进 footer 常驻位，下次看屏幕仍
+                        // 知道刚才为何没产出（错误不能只留在会滚走的 transcript）。
+                        if is_billing_text(&err) {
+                            self.billing_notice = Some("计费不足".to_string());
+                        }
+                    } else if !self.turn_had_output {
+                        // 零产出显著提示（cli 2026-10-20）：成功收尾却没有任何
+                        // 工作阶段正文 —— 402/余额不足那类故障里模型一个字都没
+                        // 说，用户只看到 `◜ done`，完全不知道「这轮没说出话」。
+                        // 打一条显著红条，把这个事实摆到明面上。`self.error`
+                        // 非空时已走上面的 detail（含分类后的可读信息），不重复打。
+                        self.push_error(
+                            "本轮模型未产出任何内容（可能因账户余额/计费、网络或服务异常）· 若伴随报错请对照上方错误",
+                        );
                     }
                     // CC-style tail: `◜ {动词} for 4.2s · done 18:39` (cli
                     // 2026-09-24: the `· N 个工具` / `· 总结 type=… audit=…`
@@ -1958,11 +2028,18 @@ impl App {
                     self.push_tail(self.turn_started.elapsed().as_secs_f64());
                 } else {
                     self.error = Some(report.error.clone());
+                    if is_billing_text(&report.error) {
+                        self.billing_notice = Some("计费不足".to_string());
+                    }
                     self.push_error(&format!("沉淀阶段失败：{}", report.error));
                 }
             }
             Err(e) => {
-                self.error = Some(e.to_string());
+                let msg = e.to_string();
+                if is_billing_text(&msg) {
+                    self.billing_notice = Some("计费不足".to_string());
+                }
+                self.error = Some(msg);
                 self.push_error_detail(&format!("回合失败：{e}"));
             }
         }
@@ -2014,6 +2091,8 @@ impl App {
         // 后重发的排队消息都走它 —— 旧轮次绝不能残留（cli 2026-10-04）。
         self.auto_round = 0;
         self.turn_tools = 0;
+        self.turn_had_output = false;
+        self.billing_notice = None;
         self.turn_started = Instant::now();
         self.state = State::Streaming;
         self.progress = [StageProgress::default(); 3];
@@ -2055,6 +2134,41 @@ impl App {
     /// Number of messages waiting in the queue (tests / callers).
     pub fn queued_len(&self) -> usize {
         self.queue.len()
+    }
+
+    /// Withdraw (discard) the **newest** queued message — `ctrl+x ctrl+u`
+    /// (cli 2026-10-20「加一个把排队队列里最后一条消息撤回的快捷键」).
+    ///
+    /// Why it is needed: mid-turn the queue only ever **grows** (Enter appends),
+    /// and the one existing way to get a wrong queued line out of the way is `↑`,
+    /// which pulls it back into the box — that *moves* it (and only while the box
+    /// is empty), so it cannot be used to simply drop a message you no longer
+    /// want. This is the explicit discard: newest out of the queue, plus one line
+    /// of confirmation in the transcript.
+    ///
+    /// The confirmation prints a **preview** of what was dropped: a silent
+    /// removal leaves the user unsure which line just disappeared, and the queue
+    /// is the one place where a message can vanish without landing anywhere else.
+    ///
+    /// Returns the withdrawn text, or `None` when the queue was already empty (in
+    /// which case a dim notice says so rather than the chord being inert with no
+    /// explanation).
+    pub fn withdraw_last_queued(&mut self) -> Option<String> {
+        let Some(text) = self.queue.pop() else {
+            self.push_notice("没有可撤回的排队消息");
+            return None;
+        };
+        const PREVIEW_COLS: usize = 40;
+        let preview = if display_width(&text) > PREVIEW_COLS {
+            format!("{}…", truncate(&text, PREVIEW_COLS))
+        } else {
+            text.clone()
+        };
+        self.push_notice(&format!(
+            "已撤回最后一条排队消息（剩 {} 条）：{preview}",
+            self.queue.len()
+        ));
+        Some(text)
     }
 
     /// Everything the user has typed but **not** submitted yet — the queued
@@ -2417,33 +2531,27 @@ impl App {
         }
     }
 
-    /// Append an assistant reply: a `● ` bullet on the first line, the remaining
-    /// lines rendered as markdown (T12 富文本 — bold / italic / headings / lists
-    /// / inline & fenced code / tables, via `tui-markdown`).
+    /// Append an assistant reply as a `●` block (T12 富文本 — bold / italic /
+    /// headings / lists / inline & fenced code / tables).
+    ///
+    /// The reply is **not** rendered here: it is stored as source markdown in
+    /// [`Item::Answer`] and laid out on every render at the width the pane has at
+    /// that moment (see [`answer_lines`]). Rendering at push time used to freeze
+    /// the table column widths of whichever width was in force when the text
+    /// arrived — and, worse, a table wider than the pane then got truncated cell
+    /// by cell, silently swallowing text (cli 2026-10-19「表格排版会吞掉字」).
     fn push_answer(&mut self, text: &str) {
         let text = text.trim();
         if text.is_empty() {
             return;
         }
-        let mut md = markdown_lines(text);
-        if let Some(first) = md.first_mut() {
-            let taken = std::mem::take(first);
-            let mut spans = vec![Span::styled(
-                "● ",
-                Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-            )];
-            // cli 2026-09-24 ⑦: the reply carries its stage tag (low-saturation).
-            if let Some(tag) = stage_tag_span(&self.stream_stage) {
-                spans.push(tag);
-            }
-            spans.extend(taken.spans);
-            *first = Line::from(spans);
-        }
+        let stage = self.stream_stage.clone();
         // The reply is its own block → one blank line before it (§12.14).
         self.blank_separator();
-        for l in md {
-            self.push_line(l);
-        }
+        self.scrollback.push(Item::Answer {
+            stage,
+            text: text.to_string(),
+        });
         // No trailing blank here: the *next* block adds its own separator.
     }
 
@@ -2971,40 +3079,27 @@ impl App {
             any = true;
             tail.push(line);
         }
-        // Live answer (`● …`) — rendered as markdown so the reply looks the same
-        // while it streams as it does once committed (T12).
+        // Live answer (`● …`) — rendered as markdown at the same width the
+        // committed form will use, so the reply looks identical while it streams
+        // and after it settles — and so a table's columns already fit the pane
+        // (T12 / cli 2026-10-19「表格排版会吞掉字」).
         if !self.streaming.trim().is_empty() {
             if any {
                 tail.push(Line::from(""));
             }
             any = true;
-            for (i, line) in markdown_lines(self.streaming.trim())
-                .into_iter()
-                .enumerate()
-            {
-                if i == 0 {
-                    let mut spans = vec![Span::styled(
-                        "● ",
-                        Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
-                    )];
-                    // cli 2026-09-24 ⑦ (「正文输出都要有阶段标志」): the *live*
-                    // reply carries the same stage tag its committed form does.
-                    // This path was left tag-less when §12.13 stripped the badges,
-                    // but ⑦ reversed that — keep the two render paths in step.
-                    if let Some(tag) = stage_tag_span(&self.stream_stage) {
-                        spans.push(tag);
-                    }
-                    spans.extend(line.spans);
-                    tail.push(Line::from(spans));
-                } else {
-                    tail.push(line);
-                }
-            }
+            tail.extend(answer_lines(
+                &self.stream_stage,
+                self.streaming.trim(),
+                wrap_width,
+            ));
         }
         // Pending queued messages (cli 2026-09-24 ③, CC 「排队」): each shows as
         // the same reverse-video `❯` bar a submitted turn gets, with the newest
         // carrying the `ctrl+x ctrl+s 立即发送` hint — so a mid-turn message is
-        // visibly *waiting* rather than silently buffered.
+        // visibly *waiting* rather than silently buffered. cli 2026-10-20: the
+        // same line also advertises `ctrl+x ctrl+u 撤回` — a chord nobody would
+        // guess, so it has to be discoverable where the queue is visible.
         for (i, msg) in self.queue.iter().enumerate() {
             if any {
                 tail.push(Line::from(""));
@@ -3016,9 +3111,9 @@ impl App {
                 // 缓冲，cli 2026-10-04），所以提示如实改成「结束后发送」——UI 文案
                 // 必须与真实行为一致，不能让用户按了一个无效的快捷键。
                 let hint = if is_auto_stage(&self.stage) {
-                    "  自动模式进行中 · 结束后发送"
+                    "  自动模式进行中 · 结束后发送 · ctrl+x ctrl+u 撤回"
                 } else {
-                    "  ctrl+x ctrl+s 立即发送"
+                    "  ctrl+x ctrl+s 立即发送 · ctrl+x ctrl+u 撤回"
                 };
                 tail.push(Line::from(Span::styled(
                     hint,
@@ -3478,7 +3573,17 @@ impl App {
                     base
                 }
             }
-            State::Idle => "待命".to_string(),
+            State::Idle => {
+                // 计费/余额类故障的常驻提醒（cli 2026-10-20）：回合已结束
+                // （Idle），但 402 那类「账户没钱」若只留一条会滚走的 transcript
+                // 红字，用户下一次看屏幕时已经不知道刚才为何没产出。把它钉在
+                // footer 左槽，直到新一轮 `begin_turn` 清掉。
+                if let Some(b) = &self.billing_notice {
+                    format!("{b} · 见上方错误")
+                } else {
+                    "待命".to_string()
+                }
+            }
         }
     }
 
@@ -3627,6 +3732,21 @@ fn human_stage(stage: &str) -> &str {
         _ if is_auto_stage(stage) => "作答中",
         other => other,
     }
+}
+
+/// 这段错误文本是不是**计费/余额不足**类（cli 2026-10-20）：footer 常驻提醒
+/// 的触发条件。与 `lingmiao_llm::error_classify` 的 billing 关键词保持一致
+/// （402 / insufficient balance / 计费 / 余额 / billing / quota）—— 但只用于
+/// UI 显示，不重复做分类（分类在 llm 层，此处只认「要不要钉进 footer」）。
+fn is_billing_text(text: &str) -> bool {
+    let t = text.to_lowercase();
+    t.contains("402")
+        || t.contains("insufficient balance")
+        || t.contains("quota exceeded")
+        || t.contains("out of credit")
+        || t.contains("billing")
+        || t.contains("余额")
+        || t.contains("计费")
 }
 
 /// Compact token count: `1234` → `1.2K`.
@@ -4203,6 +4323,47 @@ fn user_bar_lines(text: &str, width: usize) -> Vec<Line<'static>> {
     lines
 }
 
+/// Render one assistant reply at pane `width`: markdown laid out **at that
+/// width** (so a table's columns fit the pane instead of being sized for whatever
+/// width was current when the text arrived), prefixed with the `●` bullet and the
+/// stage tag.
+///
+/// Shared by the committed path ([`Item::Answer`]) and the live streaming path in
+/// `render_conversation`, so a reply looks identical while streaming and once
+/// committed — the property that made the old duplicated code drift apart.
+fn answer_lines(stage: &str, text: &str, width: usize) -> Vec<Line<'static>> {
+    // The bullet + stage tag sit in front of the reply's **first** line, so a
+    // table that starts the reply must be laid out `prefix` columns narrower —
+    // otherwise the grid is exactly pane-wide and the outer `wrap_line` tears its
+    // first border row in half (cli 2026-10-19). A table further down the reply
+    // starts on its own line and keeps the full width.
+    let prefix_w = 2 + stage_tag_span(stage)
+        .map(|s| display_width(&s.content))
+        .unwrap_or(0);
+    let mut md = markdown_lines_width(text, Some(width));
+    let starts_with_table = md
+        .first()
+        .and_then(|l| l.spans.first())
+        .is_some_and(|s| s.content.starts_with('┌'));
+    if starts_with_table && width > prefix_w {
+        md = markdown_lines_width(text, Some(width - prefix_w));
+    }
+    if let Some(first) = md.first_mut() {
+        let taken = std::mem::take(first);
+        let mut spans = vec![Span::styled(
+            "● ",
+            Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+        )];
+        // cli 2026-09-24 ⑦: the reply carries its stage tag (low-saturation).
+        if let Some(tag) = stage_tag_span(stage) {
+            spans.push(tag);
+        }
+        spans.extend(taken.spans);
+        *first = Line::from(spans);
+    }
+    md
+}
+
 /// The trailing hint a folded tool output collapses to (§12.10 P1-a), aligned
 /// under the `⎿` result body. It reuses the *same* `ctrl+o 展开` affordance as
 /// the reasoning fold so a single key reveals every hidden block.
@@ -4436,6 +4597,7 @@ fn is_keyword_token(tok: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::markdown::markdown_lines;
     use crate::motion::VERBS;
     use serde_json::{Value, json};
 
@@ -5931,6 +6093,92 @@ mod tests {
             .flat_map(|l| l.spans.iter())
             .any(|s| s.content.contains("加粗") && s.style.add_modifier.contains(Modifier::BOLD));
         assert!(bold, "bold span carries the BOLD modifier");
+    }
+
+    /// A table in a reply is laid out to the **pane**, and no cell text is lost:
+    /// the pre-fix path truncated every over-wide cell with no ellipsis (cli
+    /// 2026-10-19「表格排版会吞掉字」), and drew the table at whatever width was
+    /// current when the reply arrived, so a later resize kept the old widths.
+    #[test]
+    fn a_reply_table_fits_the_pane_and_keeps_every_cell() {
+        let mut app = App::new("m", "p");
+        app.width = 60;
+        type_str(&mut app, "列一下");
+        app.on_key(key(KeyCode::Enter));
+        app.on_event(&Event::LlmDelta {
+            stage: STAGE_C.into(),
+            kind: "content".into(),
+            text: "| 项目 | 说明 |\n|---|---|\n| 引擎硬拦 | 工具白名单、先读后写、路径沙箱三道物理拦截 |\n"
+                .into(),
+        });
+        app.on_turn_done(Ok(Default::default()));
+        let lines = app.take_scrollback();
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect();
+        // Every character of the long cell survives (grid chrome filtered out so a
+        // cell wrapped onto a second grid row still matches).
+        let plain: String = text
+            .chars()
+            .filter(|c| !"│┌┬┐├┼┤└┴┘─".contains(*c))
+            .collect();
+        assert!(plain.contains("先读后写、路"), "cell head kept: {plain:?}");
+        // The cell is wrapped across grid rows, so its own text is no longer
+        // contiguous — assert on the pieces on either side of the break instead.
+        assert!(plain.contains("先读后写、路"), "cell head kept: {plain:?}");
+        assert!(
+            plain.contains("理拦截"),
+            "cell tail wrapped, not dropped: {plain:?}"
+        );
+        // No rendered line is wider than the pane.
+        for l in &lines {
+            let w: usize = l
+                .spans
+                .iter()
+                .map(|s| display_width(&s.content))
+                .sum::<usize>();
+            assert!(w <= app.width as usize, "line {w} > pane: {l:?}");
+        }
+    }
+
+    /// Re-laying the reply out at the *current* width on every render: a resize
+    /// re-fits the table instead of keeping the widths in force when it arrived.
+    #[test]
+    fn a_reply_table_refits_after_a_resize() {
+        let mut app = App::new("m", "p");
+        type_str(&mut app, "列一下");
+        app.on_key(key(KeyCode::Enter));
+        app.on_event(&Event::LlmDelta {
+            stage: STAGE_C.into(),
+            kind: "content".into(),
+            text: "| 阶段 | 说明 |\n|---|---|\n| 组织上下文 | 检索记忆与约束，每轮都跑一遍 |\n"
+                .into(),
+        });
+        app.on_turn_done(Ok(Default::default()));
+        // The grid's top border reveals the width the table was laid out at.
+        let grid_width = |app: &App| -> usize {
+            app.history_lines()
+                .iter()
+                .find(|l| l.spans.iter().any(|s| s.content.contains('┌')))
+                .map(|l| {
+                    l.spans
+                        .iter()
+                        .map(|s| display_width(&s.content))
+                        .sum::<usize>()
+                })
+                .expect("the table drew a grid")
+        };
+        app.width = 120;
+        let wide = grid_width(&app);
+        app.width = 50;
+        let narrow = grid_width(&app);
+        assert!(
+            wide > narrow && narrow <= 50,
+            "the table is re-laid out at the current width ({wide} → {narrow}), \
+             not frozen at the width in force when the reply arrived"
+        );
     }
 
     #[test]
@@ -8182,6 +8430,80 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_x_ctrl_u_withdraws_the_newest_queued_message() {
+        // cli 2026-10-20「加一个把排队队列里最后一条消息撤回的快捷键」.
+        let mut app = App::new("m", "p");
+        type_str(&mut app, "hi");
+        app.on_key(key(KeyCode::Enter));
+        type_str(&mut app, "first queued");
+        app.on_key(key(KeyCode::Enter));
+        type_str(&mut app, "second queued");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.queued_len(), 2);
+        // A lone ctrl+u (never armed) stays the line editor's kill-to-start.
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            Action::None
+        );
+        assert_eq!(app.queued_len(), 2, "unarmed ctrl+u withdraws nothing");
+        // ctrl+x arms, then ctrl+u withdraws **the newest** one.
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL)),
+            Action::None
+        );
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            Action::None,
+            "withdrawing is local — the run loop is never involved"
+        );
+        assert_eq!(app.queued_len(), 1);
+        // The remaining message is the *older* one (newest-out, like a stack).
+        assert_eq!(app.dequeue_turn(), Some("first queued".into()));
+        // The transcript said which line went away — a silent removal would
+        // leave the user guessing.
+        let sb = scrollback_text(&mut app);
+        assert!(sb.contains("已撤回最后一条排队消息"), "{sb}");
+        assert!(sb.contains("second queued"), "withdrawn line preview: {sb}");
+    }
+
+    #[test]
+    fn withdrawing_an_empty_queue_says_so_instead_of_doing_nothing() {
+        let mut app = App::new("m", "p");
+        type_str(&mut app, "hi");
+        app.on_key(key(KeyCode::Enter));
+        assert_eq!(app.queued_len(), 0);
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL));
+        assert_eq!(
+            app.on_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+            Action::None
+        );
+        let sb = scrollback_text(&mut app);
+        assert!(sb.contains("没有可撤回的排队消息"), "{sb}");
+    }
+
+    #[test]
+    fn queued_hint_advertises_both_chords() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut app = App::new("m", "p");
+        type_str(&mut app, "hi");
+        app.on_key(key(KeyCode::Enter));
+        type_str(&mut app, "queued please");
+        app.on_key(key(KeyCode::Enter));
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(text.contains("ctrl+x ctrl+s"), "send-now hint: {text:?}");
+        assert!(text.contains("ctrl+x ctrl+u"), "withdraw hint: {text:?}");
+    }
+
+    #[test]
     fn activity_spinner_cycles_through_the_arc_frames() {
         // cli 2026-09-28: the activity mark is a rotating **arc** — not CC's
         // asterisk family, whose glyphs this terminal had to substitute from a
@@ -8739,5 +9061,103 @@ mod tests {
             Action::Submit("restored".into())
         );
         assert_eq!(app.unsubmitted(), SessionInput::default());
+    }
+
+    // ── 零产出显著提示 + 计费常驻（cli 2026-10-20「把其他问题一起修了」） ─────
+
+    /// A successful turn with **no** 工作阶段 output shows the red zero-output
+    /// notice — the 402/余额 case where the model said nothing at all.
+    #[test]
+    fn a_successful_turn_with_no_output_flags_the_zero_output_notice() {
+        let mut app = App::new("m", "p");
+        // Simulate a turn: it opened, but no `content` delta ever arrived.
+        app.begin_turn("q");
+        assert!(!app.turn_had_output);
+        app.on_turn_done(Ok(SummaryReport::default()));
+        let text: String = app
+            .history_lines()
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            text.contains("本轮模型未产出任何内容"),
+            "expected the zero-output red notice, got: {text:?}"
+        );
+    }
+
+    /// A turn that *did* stream answer content does **not** show the notice.
+    #[test]
+    fn a_turn_with_answer_output_does_not_flag_the_zero_output_notice() {
+        let mut app = App::new("m", "p");
+        app.begin_turn("q");
+        app.on_event(&Event::LlmDelta {
+            stage: STAGE_C.to_string(),
+            kind: "content".to_string(),
+            text: "一些回答".to_string(),
+        });
+        assert!(app.turn_had_output);
+        app.on_turn_done(Ok(SummaryReport::default()));
+        let text: String = app
+            .history_lines()
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(
+            !text.contains("本轮模型未产出任何内容"),
+            "must not flag when there was output, got: {text:?}"
+        );
+    }
+
+    /// A turn that ended on a *recorded* stage fault surfaces that error detail
+    /// instead of the generic zero-output notice (no double message).
+    #[test]
+    fn a_turn_with_a_recorded_fault_shows_the_fault_not_the_zero_output_notice() {
+        let mut app = App::new("m", "p");
+        app.begin_turn("q");
+        app.on_event(&Event::StageResultReported {
+            stage: STAGE_C.to_string(),
+            ok: false,
+            data: serde_json::json!({}),
+            fault_type: "llm".to_string(),
+            fault_detail: "HTTP 402 [账户余额/计费不足] —— 请充值".to_string(),
+            tokens: serde_json::json!({}),
+            tool_calls: 0,
+            elapsed_ms: 1.0,
+        });
+        app.on_turn_done(Ok(SummaryReport::default()));
+        let text: String = app
+            .history_lines()
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.to_string()))
+            .collect();
+        assert!(text.contains("HTTP 402"), "fault detail shown: {text:?}");
+        assert!(
+            !text.contains("本轮模型未产出任何内容"),
+            "no duplicate generic notice when a fault is recorded: {text:?}"
+        );
+        // …and the billing notice is pinned into the footer (常驻位).
+        assert_eq!(app.footer_status(), "计费不足 · 见上方错误");
+    }
+
+    /// The billing footer notice clears on the next turn (`begin_turn`).
+    #[test]
+    fn the_billing_footer_notice_clears_on_the_next_turn() {
+        let mut app = App::new("m", "p");
+        app.begin_turn("q");
+        app.on_event(&Event::StageResultReported {
+            stage: STAGE_C.to_string(),
+            ok: false,
+            data: serde_json::json!({}),
+            fault_type: "llm".to_string(),
+            fault_detail: "HTTP 402 Insufficient Balance".to_string(),
+            tokens: serde_json::json!({}),
+            tool_calls: 0,
+            elapsed_ms: 1.0,
+        });
+        app.on_turn_done(Ok(SummaryReport::default()));
+        assert_eq!(app.footer_status(), "计费不足 · 见上方错误");
+        // A fresh turn clears the pin.
+        app.begin_turn("next");
+        assert_ne!(app.footer_status(), "计费不足 · 见上方错误");
     }
 }
