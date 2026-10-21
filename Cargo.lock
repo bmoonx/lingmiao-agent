@@ -1162,19 +1162,23 @@ dependencies = [
 
 [[package]]
 name = "lingmiao"
-version = "0.12.46"
+version = "0.12.49"
 dependencies = [
  "chrono",
  "lingmiao-core",
  "lingmiao-engine",
+ "lingmiao-llm",
+ "lingmiao-memory",
+ "lingmiao-tools",
  "lingmiao-tui",
+ "rusqlite",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "lingmiao-core"
-version = "0.12.46"
+version = "0.12.49"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1190,7 +1194,7 @@ dependencies = [
 
 [[package]]
 name = "lingmiao-engine"
-version = "0.12.46"
+version = "0.12.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1208,7 +1212,7 @@ dependencies = [
 
 [[package]]
 name = "lingmiao-llm"
-version = "0.12.46"
+version = "0.12.49"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -1223,7 +1227,7 @@ dependencies = [
 
 [[package]]
 name = "lingmiao-memory"
-version = "0.12.46"
+version = "0.12.49"
 dependencies = [
  "chrono",
  "fastembed",
@@ -1238,7 +1242,7 @@ dependencies = [
 
 [[package]]
 name = "lingmiao-tools"
-version = "0.12.46"
+version = "0.12.49"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1257,7 +1261,7 @@ dependencies = [
 
 [[package]]
 name = "lingmiao-tui"
-version = "0.12.46"
+version = "0.12.49"
 dependencies = [
  "base64 0.22.1",
  "chrono",

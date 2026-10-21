@@ -17,3 +17,9 @@ lingmiao-tui.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 tracing.workspace = true
 chrono.workspace = true
+
+# flow_poc 编排 PoC 直接复用引擎的 RoleRuntime + 真实 client，需要直达 llm/memory/tools。
+lingmiao-llm.workspace = true
+lingmiao-memory.workspace = true
+lingmiao-tools.workspace = true
+rusqlite.workspace = true

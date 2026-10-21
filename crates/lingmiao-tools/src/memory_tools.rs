@@ -1475,7 +1475,9 @@ struct ExternalSearchArgs {
     /// Maximum merged results (default 10, capped at 20).
     #[serde(default)]
     limit: usize,
-    /// Comma list of zones to search: `chat`, `main`, `auditor`.
+    /// Comma list of zones to search: `chat`, `main`, `auditor`, plus
+    /// `workflows:<flow>` / `workflows:<flow>:<role>` for a workflow zone under
+    /// `.memory/workflows/` (e.g. `workflows:screenplay:审校`).
     /// Default: every zone present in the target project.
     #[serde(default)]
     zones: String,
@@ -1566,24 +1568,42 @@ fn discover_projects(limit: usize) -> Vec<PathBuf> {
 
 /// Parse a zone list (`chat,main,auditor`); unknown entries are ignored and an
 /// empty/unusable result falls back to every zone.
-fn parse_zones(spec: &str) -> Vec<Zone> {
-    if spec.trim().is_empty() {
-        return Zone::ALL.to_vec();
+///
+/// 工作流编排区（`.memory/workflows/<配置>/<角色>/`，engine 侧 `flow_poc` /
+/// `screenplay_flow` 在用的布局）不是 [`Zone`] 变体 —— 模型用
+/// `workflows:<配置名>`（可加 `:<角色名>`）指到那一层，这里翻译成磁盘路径段，
+/// 再由 [`search_dirs`] 一并检索。
+fn parse_zones(spec: &str) -> (Vec<Zone>, Vec<PathBuf>) {
+    let mut zones: Vec<Zone> = Vec::new();
+    let mut extra_dirs: Vec<PathBuf> = Vec::new();
+    for raw in spec.split(',') {
+        let z = raw.trim();
+        if z.is_empty() {
+            continue;
+        }
+        match z.to_ascii_lowercase().as_str() {
+            "chat" => zones.push(Zone::Chat),
+            "main" => zones.push(Zone::Main),
+            "auditor" => zones.push(Zone::Auditor),
+            _ => {
+                // `workflows:<flow>` / `workflows:<flow>:<role>` → `.memory/workflows/…`
+                if let Some(rest) = z.strip_prefix("workflows:") {
+                    let mut dir = PathBuf::from("workflows");
+                    for seg in rest.split(':') {
+                        let seg = seg.trim();
+                        if !seg.is_empty() {
+                            dir = dir.join(seg);
+                        }
+                    }
+                    extra_dirs.push(dir);
+                }
+            }
+        }
     }
-    let parsed: Vec<Zone> = spec
-        .split(',')
-        .filter_map(|z| match z.trim().to_ascii_lowercase().as_str() {
-            "chat" => Some(Zone::Chat),
-            "main" => Some(Zone::Main),
-            "auditor" => Some(Zone::Auditor),
-            _ => None,
-        })
-        .collect();
-    if parsed.is_empty() {
-        Zone::ALL.to_vec()
-    } else {
-        parsed
+    if zones.is_empty() && extra_dirs.is_empty() {
+        zones = Zone::ALL.to_vec();
     }
+    (zones, extra_dirs)
 }
 
 /// Open whichever of a zone's three searchable stores exist, **read-only** (no
@@ -1679,7 +1699,7 @@ impl Tool for SearchExternalMemoryTool {
             )));
         }
 
-        let zones = parse_zones(&a.zones);
+        let (zones, extra_dirs) = parse_zones(&a.zones);
         // Reuse this process's embedder so the query lands in the same vector
         // space the sibling store was written with (keyword recall still works
         // when the bundle has no embedder).
@@ -1688,14 +1708,23 @@ impl Tool for SearchExternalMemoryTool {
 
         let mut errors: Vec<String> = Vec::new();
         let mut hits: Vec<MemoryHit> = Vec::new();
-        let mut searched: Vec<&str> = Vec::new();
+        let mut searched: Vec<String> = Vec::new();
         let mut space_warnings: Vec<String> = Vec::new();
         // Whether *any* zone actually ran the semantic/KG passes. Reported as
         // `semantic_recall` — it must be `false` whenever embedding recall could
         // not run, not merely when a cross-space mismatch was seen.
         let mut semantic_used = false;
-        for zone in zones {
-            let zdir = zone.dir(&mem_dir);
+        // (zone name on the wire, directory holding its DBs)
+        let mut zone_dirs: Vec<(String, PathBuf)> = zones
+            .iter()
+            .map(|z| (z.name().to_string(), z.dir(&mem_dir)))
+            .collect();
+        // 工作流编排区（`.memory/workflows/…`）不是 Zone 变体，按目录段直挂。
+        for dir in extra_dirs {
+            let label = dir.display().to_string().replace('\\', "/");
+            zone_dirs.push((label, mem_dir.join(dir)));
+        }
+        for (zone_name, zdir) in zone_dirs {
             if !zdir.is_dir() {
                 continue;
             }
@@ -1719,8 +1748,7 @@ impl Tool for SearchExternalMemoryTool {
             if let (Some(cur), Some(rec)) = (current_backend, recorded.as_deref()) {
                 if cur != rec {
                     semantic = false;
-                    space_warnings
-                        .push(format!("{}: 记录后端 `{rec}` ≠ 当前 `{cur}`", zone.name()));
+                    space_warnings.push(format!("{zone_name}: 记录后端 `{rec}` ≠ 当前 `{cur}`"));
                 }
             }
             semantic_used |= semantic;
@@ -1733,9 +1761,9 @@ impl Tool for SearchExternalMemoryTool {
                 &mut errors,
             );
             for h in &mut zone_hits {
-                h.layer = format!("{}/{}", zone.name(), h.layer);
+                h.layer = format!("{zone_name}/{}", h.layer);
             }
-            searched.push(zone.name());
+            searched.push(zone_name);
             hits.extend(zone_hits);
         }
 
@@ -2891,5 +2919,74 @@ mod tests {
             "node sees the same rows: {node_links:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[tokio::test]
+    async fn cross_project_search_reaches_a_workflow_zone() {
+        // 工作流编排区（`.memory/workflows/<flow>/<role>/`）不是 Zone 变体 ——
+        // `zones: "workflows:<flow>:<role>"` 必须能把它捞回来（cli 2026-10-21：
+        // 对话模式要能搜到同工程其他模式/编排的记忆）。
+        let ext_root = std::env::temp_dir().join(format!("lingmiao-ext-wf-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ext_root);
+        std::fs::create_dir_all(&ext_root).unwrap();
+        let emb: Arc<dyn lingmiao_memory::Embedder> = Arc::new(HashingEmbedder::new());
+        let role_dir = ext_root
+            .join(".memory")
+            .join("workflows")
+            .join("screenplay")
+            .join("编剧");
+        let role_mem = Memory::open_in_dir(&role_dir, Zone::Chat, Some(emb)).unwrap();
+        role_mem
+            .observations
+            .insert(&NewObservation::new(
+                "decision",
+                "story hook",
+                "the screenplay workflow fixed the hook as a letter",
+            ))
+            .unwrap();
+
+        let (mem, dir) = temp_memory("ext-wf");
+        let mut reg = ToolRegistry::new();
+        register(&mut reg, mem, None);
+        let out = reg
+            .execute(
+                "search_external_memory",
+                json!({
+                    "project_dir": ext_root.display().to_string(),
+                    "keyword": "screenplay hook letter",
+                    "zones": "workflows:screenplay:编剧",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content
+                .contains("workflows/screenplay/编剧/observations"),
+            "workflow zone hit must carry its path prefix: {}",
+            out.content
+        );
+        assert!(out.content.contains("story hook"), "{}", out.content);
+
+        // Default sweep (empty zones) still covers chat/main/auditor — a workflow
+        // zone is opt-in, never swept accidentally.
+        let default_out = reg
+            .execute(
+                "search_external_memory",
+                json!({
+                    "project_dir": ext_root.display().to_string(),
+                    "keyword": "screenplay hook letter",
+                }),
+            )
+            .await
+            .unwrap();
+        assert!(
+            !default_out.content.contains("workflows/"),
+            "default sweep must not enter workflows: {}",
+            default_out.content
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&ext_root).ok();
     }
 }

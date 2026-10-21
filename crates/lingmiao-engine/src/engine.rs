@@ -1430,6 +1430,44 @@ mod tests {
     }
 
     #[test]
+    fn c_system_teaches_the_blank_slate_memory_handshake() {
+        // cli 2026-10-21：对话模式的记忆引导必须写进 C.system —— 引擎每轮从空白
+        // 开始，模型看不到上一轮的任何内容，「继续/刚才/上次」这类延续性输入必须
+        // 先去查记忆再回答；且要告诉模型对话/chat 分区与 main/auditor 分区是隔离
+        // 的，打通靠 search_external_memory。本测试锁死这两条，防模板被改薄。
+        let cfg = Config::load_default().unwrap();
+        let raw = cfg.prompt("C", lingmiao_core::config::PromptField::System);
+        for needle in [
+            "每轮从空白开始",
+            "延续性",
+            "whiteboard_read",
+            "search_external_memory",
+            "zones",
+            "chat",
+            "auditor",
+        ] {
+            assert!(raw.contains(needle), "C.system 缺 `{needle}`：{needle}");
+        }
+    }
+
+    #[test]
+    fn c_system_teaches_the_whiteboard_write_first_rule() {
+        // cli 2026-10-21：白板滞后问题 —— 只在「做完」后写白板，长程任务运行全程
+        // 用户看到的都是上一轮的陈旧结果。模板必须明确要求「开工第一件事先写白板
+        // （先于任何工具调用）」，并随进度即时更新。本测试锁死这条规则，防改薄。
+        let cfg = Config::load_default().unwrap();
+        let raw = cfg.prompt("C", lingmiao_core::config::PromptField::System);
+        for needle in [
+            "开工前就要写",
+            "做完才写 = 用户全程看到的是上一轮的陈旧结果",
+            "先于任何工具调用",
+            "立刻把对应 ⬜ 改成 ✅",
+        ] {
+            assert!(raw.contains(needle), "C.system 缺 `{needle}`：{needle}");
+        }
+    }
+
+    #[test]
     fn pipeline_stage_system_prompts_are_present() {
         use lingmiao_core::config::{PromptField, stage_prompt_key};
         let cfg = Config::load_default().unwrap();
